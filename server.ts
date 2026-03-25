@@ -1,3 +1,4 @@
+import fs from "fs/promises";
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -21,9 +22,44 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+const dataDir = path.join(process.cwd(), "data");
+const materialsPath = path.join(dataDir, "materials.json");
+const campaignsPath = path.join(dataDir, "campaigns.json");
+
+async function ensureDataFiles() {
+  await fs.mkdir(dataDir, { recursive: true });
+
+  try {
+    await fs.access(materialsPath);
+  } catch {
+    await fs.writeFile(materialsPath, JSON.stringify([], null, 2), "utf-8");
+  }
+
+  try {
+    await fs.access(campaignsPath);
+  } catch {
+    await fs.writeFile(campaignsPath, JSON.stringify([], null, 2), "utf-8");
+  }
+}
+
+async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
+  try {
+    const raw = await fs.readFile(filePath, "utf-8");
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+async function writeJsonFile<T>(filePath: string, data: T) {
+  await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
+}
+
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
+
+  await ensureDataFiles();
 
   app.use(express.json({ limit: "50mb" }));
 
@@ -42,7 +78,7 @@ async function startServer() {
     }
   });
 
-  // API Routes
+  // Email notification route
   app.post("/api/notify", async (req, res) => {
     const { subject, body } = req.body;
     const recipient = "reservas@viagensaventour.com";
@@ -70,7 +106,31 @@ async function startServer() {
     res.json({ success: true, message: "Notificação processada." });
   });
 
-  // Vite middleware for development
+  // Materials API
+  app.get("/api/materials", async (_req, res) => {
+    const materials = await readJsonFile(materialsPath, []);
+    res.json(materials);
+  });
+
+  app.post("/api/materials", async (req, res) => {
+    const materials = req.body;
+    await writeJsonFile(materialsPath, materials);
+    res.json({ success: true });
+  });
+
+  // Campaigns API
+  app.get("/api/campaigns", async (_req, res) => {
+    const campaigns = await readJsonFile(campaignsPath, []);
+    res.json(campaigns);
+  });
+
+  app.post("/api/campaigns", async (req, res) => {
+    const campaigns = req.body;
+    await writeJsonFile(campaignsPath, campaigns);
+    res.json({ success: true });
+  });
+
+  // Frontend
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -80,7 +140,8 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*", (req, res) => {
+
+    app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
