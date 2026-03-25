@@ -12,9 +12,9 @@ const __dirname = path.dirname(__filename);
 
 // Email Transporter Setup
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp.example.com",
-  port: parseInt(process.env.SMTP_PORT || "587"),
-  secure: process.env.SMTP_SECURE === "true",
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
@@ -23,9 +23,24 @@ const transporter = nodemailer.createTransport({
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(express.json({ limit: '50mb' }));
+  app.use(express.json({ limit: "50mb" }));
+
+  // Webhook verification for Meta
+  app.get("/webhook", (req, res) => {
+    const VERIFY_TOKEN = "aventour_token_123";
+
+    const mode = req.query["hub.mode"];
+    const token = req.query["hub.verify_token"];
+    const challenge = req.query["hub.challenge"];
+
+    if (mode && token === VERIFY_TOKEN) {
+      res.status(200).send(challenge);
+    } else {
+      res.sendStatus(403);
+    }
+  });
 
   // API Routes
   app.post("/api/notify", async (req, res) => {
@@ -36,13 +51,12 @@ async function startServer() {
     console.log(`Subject: ${subject}`);
     console.log(`Body: ${body}`);
 
-    // Only attempt real email if credentials are provided
     if (process.env.SMTP_USER && process.env.SMTP_PASS) {
       try {
         await transporter.sendMail({
           from: `"Aventour Bot" <${process.env.SMTP_USER}>`,
           to: recipient,
-          subject: subject,
+          subject,
           text: body,
         });
         console.log("Email sent successfully.");
@@ -64,10 +78,10 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
@@ -77,16 +91,3 @@ async function startServer() {
 }
 
 startServer();
-app.get("/webhook", (req, res) => {
-  const VERIFY_TOKEN = "aventour_token_123";
-
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode && token === VERIFY_TOKEN) {
-    res.status(200).send(challenge);
-  } else {
-    res.sendStatus(403);
-  }
-});
