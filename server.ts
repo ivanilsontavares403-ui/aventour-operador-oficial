@@ -195,7 +195,34 @@ app.post("/webhook", async (req, res) => {
     await writeJsonFile(campaignsPath, campaigns);
     res.json({ success: true });
   });
-
+  app.get("/privacy-policy", (_req, res) => {
+    res.send(`
+      <html>
+        <head>
+          <title>Política de Privacidade - Aventour</title>
+        </head>
+        <body style="font-family: Arial; max-width: 700px; margin: 40px auto;">
+          <h1>Política de Privacidade</h1>
+  
+          <p>A Aventour respeita a privacidade dos seus clientes.</p>
+  
+          <p>Os dados recolhidos através do Messenger ou do chatbot são utilizados apenas para:</p>
+          <ul>
+            <li>Responder pedidos de informação</li>
+            <li>Processar reservas</li>
+            <li>Melhorar o atendimento ao cliente</li>
+          </ul>
+  
+          <p>Não partilhamos dados com terceiros.</p>
+  
+          <p>Para qualquer questão contacte:</p>
+  
+          <p><b>reservas@viagensaventour.com</b></p>
+        </body>
+      </html>
+    `);
+  });
+  
   // Frontend
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
