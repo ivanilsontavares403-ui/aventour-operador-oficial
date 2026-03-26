@@ -5,17 +5,18 @@ import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import nodemailer from "nodemailer";
+import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Email Transporter Setup
+// Configuração do E-mail (Nodemailer)
 const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 465,
-  secure: true,
+  host: process.env.SMTP_HOST || "smtp.gmail.com",
+  port: parseInt(process.env.SMTP_PORT || "465"),
+  secure: process.env.SMTP_SECURE !== "false",
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
@@ -26,268 +27,147 @@ const dataDir = path.join(process.cwd(), "data");
 const materialsPath = path.join(dataDir, "materials.json");
 const campaignsPath = path.join(dataDir, "campaigns.json");
 
+// Garante que as pastas e arquivos de dados existam
 async function ensureDataFiles() {
   await fs.mkdir(dataDir, { recursive: true });
-
-  try {
-    await fs.access(materialsPath);
-  } catch {
-    await fs.writeFile(materialsPath, JSON.stringify([], null, 2), "utf-8");
-  }
-
-  try {
-    await fs.access(campaignsPath);
-  } catch {
-    await fs.writeFile(campaignsPath, JSON.stringify([], null, 2), "utf-8");
-  }
+  try { await fs.access(materialsPath); } catch { await fs.writeFile(materialsPath, "[]"); }
+  try { await fs.access(campaignsPath); } catch { await fs.writeFile(campaignsPath, "[]"); }
 }
 
 async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
   try {
     const raw = await fs.readFile(filePath, "utf-8");
     return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
+  } catch { return fallback; }
 }
 
 async function writeJsonFile<T>(filePath: string, data: T) {
   await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
 
+// --- INTEGRAÇÃO GEMINI & MESSENGER ---
+
+interface Campaign {
+  id: string; title: string; keywords: string[]; context: string; active: boolean;
+}
+
+interface Material {
+  id: string; title: string; category: string; fileUrl: string;
+}
+
+// O "Cérebro" do Bot - Mesma lógica do App.tsx
+const getSystemInstruction = (campaigns: Campaign[], materials: Material[]) => {
+  const activeCampaigns = campaigns.filter(c => c.active).map(c => `- ${c.title}: ${c.context} (Keywords: ${c.keywords.join(', ')})`).join('\n');
+  const availableMaterials = materials.map(m => `- ${m.title} (${m.category})`).join('\n');
+
+  return `Você é um Consultor Comercial profissional da agência Aventour Viagens e Turismo.
+Fale sempre como um ser humano, de forma natural, prestativa e comercial.
+
+REGRAS DE LINGUAGEM E COMPORTAMENTO:
+- NUNCA use expressões automáticas como: "Cliente Web", "verificar no chat", "estou a processar sistema".
+- Use linguagem comercial natural: "Já verifiquei a melhor opção disponível", "Vamos avançar com a emissão".
+- NUNCA ofereça dados de pagamento ou IBAN de forma proativa. Primeiro, construa confiança.
+- Só envie os dados de pagamento se o cliente pedir explicitamente.
+- Nunca use emojis. Responda de forma direta e profissional.
+
+SERVIÇOS E PREÇOS:
+1. PASSAGEM AÉREA: Valor depende de data/disponibilidade. Peça Destino, Data e Pessoas.
+2. RESERVA DE PASSAGEM: 1.000 CVE.
+3. RESERVA DE HOTEL: 60 CVE por dia.
+4. FORMAÇÕES EM PORTUGAL: 45.000 CVE total. (Inscrição 6.000 + Matrícula 39.000).
+   - Requisitos: 18+ anos e 9º ano concluído.
+5. AGENDAMENTOS: Estudante (12.500 CVE + Taxa) / Férias (20.000 CVE).
+
+CAMPANHAS ATIVAS:
+${activeCampaigns}
+
+MATERIAIS DISPONÍVEIS:
+${availableMaterials}`;
+};
+
+async function callGemini(message: string) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY is missing");
+
+  const ai = new GoogleGenAI({ apiKey });
+  const campaigns = await readJsonFile<Campaign[]>(campaignsPath, []);
+  const materials = await readJsonFile<Material[]>(materialsPath, []);
+  
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: message,
+    config: { systemInstruction: getSystemInstruction(campaigns, materials) },
+  });
+
+  return response.text;
+}
+
+async function sendMessengerMessage(recipientId: string, text: string) {
+  const PAGE_ACCESS_TOKEN = process.env.MESSENGER_PAGE_ACCESS_TOKEN;
+  if (!PAGE_ACCESS_TOKEN) return console.log(`[LOG]: ${text}`);
+
+  await fetch(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ recipient: { id: recipientId }, message: { text } }),
+  });
+}
+
+// --- SERVIDOR EXPRESS ---
+
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  const PORT = 3000;
 
   await ensureDataFiles();
-
   app.use(express.json({ limit: "50mb" }));
 
-  // Webhook verification (Meta envia GET aqui)
-app.get("/webhook", (req, res) => {
-  const VERIFY_TOKEN = "aventour_token_123";
+  // Webhook da Meta (Verificação)
+  app.get("/webhook", (req, res) => {
+    const VERIFY_TOKEN = "aventour_token_123";
+    if (req.query["hub.mode"] === "subscribe" && req.query["hub.verify_token"] === VERIFY_TOKEN) {
+      res.status(200).send(req.query["hub.challenge"]);
+    } else { res.sendStatus(403); }
+  });
 
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode && token === VERIFY_TOKEN) {
-    res.status(200).send(challenge);
-  } else {
-    res.sendStatus(403);
-  }
-});
-
-// Receber mensagens do Messenger (Meta envia POST aqui)
-app.post("/webhook", async (req, res) => {
-  const body = req.body;
-
-  if (body.object === "page") {
-    for (const entry of body.entry || []) {
-      for (const event of entry.messaging || []) {
-        const senderId = event.sender?.id;
-        const messageText = event.message?.text;
-
-        if (!senderId || !messageText) continue;
-
-        console.log("Mensagem recebida:", messageText);
-
-        let replyText =
-          "Obrigado pela sua mensagem. Em instantes iremos responder.";
-
-        const text = messageText.toLowerCase();
-
-        if (
-          text.includes("preço") ||
-          text.includes("passagem") ||
-          text.includes("reserva") ||
-          text.includes("hotel") ||
-          text.includes("visto")
-        ) {
-          replyText =
-            "Recebemos o seu pedido. A nossa equipa comercial irá analisar e responder brevemente.";
+  // Webhook da Meta (Receber Mensagens)
+  app.post("/webhook", async (req, res) => {
+    const body = req.body;
+    if (body.object === "page") {
+      for (const entry of body.entry) {
+        const event = entry.messaging[0];
+        if (event.message && event.message.text) {
+          const senderId = event.sender.id;
+          const userMessage = event.message.text;
+          console.log(`Mensagem de ${senderId}: ${userMessage}`);
 
           try {
-            await fetch("http://localhost:" + process.env.PORT + "/api/notify", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                subject: "Novo lead Messenger",
-                body: `Mensagem: ${messageText}\nSender: ${senderId}`,
-              }),
-            });
-          } catch (error) {
-            console.error("Erro ao enviar email:", error);
-          }
-        }
-
-        try {
-          await fetch(
-            `https://graph.facebook.com/v23.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                recipient: { id: senderId },
-                message: { text: replyText },
-              }),
-            }
-          );
-        } catch (error) {
-          console.error("Erro ao responder Messenger:", error);
+            const botResponse = await callGemini(userMessage);
+            await sendMessengerMessage(senderId, botResponse || "Desculpe, tente novamente.");
+          } catch (e) { console.error(e); }
         }
       }
-    }
-
-    res.sendStatus(200);
-  } else {
-    res.sendStatus(404);
-  }
-});
-  // Email notification route
-  app.post("/webhook", async (req, res) => {
-    try {
-      const body = req.body;
-  
-      if (body.object !== "page") {
-        return res.sendStatus(404);
-      }
-  
-      for (const entry of body.entry) {
-        const events = entry.messaging;
-  
-        for (const event of events) {
-          // Ignorar mensagens enviadas pela própria página (echo)
-          if (event.message?.is_echo) {
-            continue;
-          }
-  
-          // Ignorar delivery confirmations
-          if (event.delivery) {
-            continue;
-          }
-  
-          // Ignorar read receipts
-          if (event.read) {
-            continue;
-          }
-  
-          if (event.message?.text) {
-            const senderId = event.sender.id;
-  
-            console.log("Mensagem recebida:", event.message.text);
-  
-            await sendMessengerMessage(
-              senderId,
-              "Recebemos o seu pedido. A nossa equipa comercial irá analisar e responder brevemente."
-            );
-          }
-        }
-      }
-  
-      res.sendStatus(200);
-    } catch (error) {
-      console.error("Erro no webhook:", error);
-      res.sendStatus(500);
-    }
+      res.status(200).send("EVENT_RECEIVED");
+    } else { res.sendStatus(404); }
   });
 
-  // Materials API
-  app.get("/api/materials", async (_req, res) => {
-    const materials = await readJsonFile(materialsPath, []);
-    res.json(materials);
-  });
+  // APIs de Administração
+  app.get("/api/materials", async (req, res) => res.json(await readJsonFile(materialsPath, [])));
+  app.post("/api/materials", async (req, res) => { await writeJsonFile(materialsPath, req.body); res.json({success: true}); });
+  app.get("/api/campaigns", async (req, res) => res.json(await readJsonFile(campaignsPath, [])));
+  app.post("/api/campaigns", async (req, res) => { await writeJsonFile(campaignsPath, req.body); res.json({success: true}); });
 
-  app.post("/api/materials", async (req, res) => {
-    const materials = req.body;
-    await writeJsonFile(materialsPath, materials);
-    res.json({ success: true });
-  });
-
-  // Campaigns API
-  app.get("/api/campaigns", async (_req, res) => {
-    const campaigns = await readJsonFile(campaignsPath, []);
-    res.json(campaigns);
-  });
-
-  app.post("/api/campaigns", async (req, res) => {
-    const campaigns = req.body;
-    await writeJsonFile(campaignsPath, campaigns);
-    res.json({ success: true });
-  });
-  app.get("/privacy-policy", (_req, res) => {
-    res.send(`
-      <html>
-        <head>
-          <title>Política de Privacidade - Aventour</title>
-        </head>
-        <body style="font-family: Arial; max-width: 700px; margin: 40px auto;">
-          <h1>Política de Privacidade</h1>
-  
-          <p>A Aventour respeita a privacidade dos seus clientes.</p>
-  
-          <p>Os dados recolhidos através do Messenger ou do chatbot são utilizados apenas para:</p>
-          <ul>
-            <li>Responder pedidos de informação</li>
-            <li>Processar reservas</li>
-            <li>Melhorar o atendimento ao cliente</li>
-          </ul>
-  
-          <p>Não partilhamos dados com terceiros.</p>
-  
-          <p>Para qualquer questão contacte:</p>
-  
-          <p><b>reservas@viagensaventour.com</b></p>
-        </body>
-      </html>
-    `);
-  });
-  app.get("/data-deletion", (_req, res) => {
-    res.status(200).send(`
-  <!DOCTYPE html>
-  <html>
-  <head>
-  <title>Data Deletion Instructions</title>
-  <meta charset="utf-8">
-  </head>
-  <body style="font-family: Arial; max-width: 700px; margin: 40px auto;">
-  <h1>Instruções para Remoção de Dados</h1>
-  <p>Se deseja solicitar a remoção dos seus dados do sistema da Aventour, envie um email para:</p>
-  
-  <p><strong>reservas@viagensaventour.com</strong></p>
-  
-  <p>Inclua no pedido:</p>
-  
-  <ul>
-  <li>Nome utilizado na conversa</li>
-  <li>Data aproximada do contacto</li>
-  </ul>
-  
-  <p>A sua solicitação será processada no prazo máximo de 7 dias.</p>
-  </body>
-  </html>
-  `);
-  });
-  
-  // Frontend
+  // Frontend (Vite ou Estático)
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-
-    app.get("*", (_req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+    app.get("*", (req, res) => res.sendFile(path.join(distPath, "index.html")));
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  app.listen(PORT, "0.0.0.0", () => console.log(`Servidor Aventour rodando na porta ${PORT}`));
 }
 
 startServer();
