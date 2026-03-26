@@ -223,24 +223,30 @@ app.post("/webhook", async (req, res) => {
     `);
   });
   app.get("/data-deletion", (_req, res) => {
-    res.send(`
-      <html>
-        <head>
-          <title>Remoção de Dados - Aventour</title>
-        </head>
-        <body style="font-family: Arial; max-width: 700px; margin: 40px auto;">
-          <h1>Instruções para Remoção de Dados</h1>
-          <p>Se deseja solicitar a remoção dos seus dados do sistema da Aventour, envie um email para:</p>
-          <p><b>reservas@viagensaventour.com</b></p>
-          <p>Inclua no pedido:</p>
-          <ul>
-            <li>Nome utilizado na conversa</li>
-            <li>Data aproximada do contacto</li>
-          </ul>
-          <p>A sua solicitação será processada no prazo máximo de 7 dias.</p>
-        </body>
-      </html>
-    `);
+    res.status(200).send(`
+  <!DOCTYPE html>
+  <html>
+  <head>
+  <title>Data Deletion Instructions</title>
+  <meta charset="utf-8">
+  </head>
+  <body style="font-family: Arial; max-width: 700px; margin: 40px auto;">
+  <h1>Instruções para Remoção de Dados</h1>
+  <p>Se deseja solicitar a remoção dos seus dados do sistema da Aventour, envie um email para:</p>
+  
+  <p><strong>reservas@viagensaventour.com</strong></p>
+  
+  <p>Inclua no pedido:</p>
+  
+  <ul>
+  <li>Nome utilizado na conversa</li>
+  <li>Data aproximada do contacto</li>
+  </ul>
+  
+  <p>A sua solicitação será processada no prazo máximo de 7 dias.</p>
+  </body>
+  </html>
+  `);
   });
   
   // Frontend
