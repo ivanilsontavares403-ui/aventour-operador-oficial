@@ -63,21 +63,87 @@ async function startServer() {
 
   app.use(express.json({ limit: "50mb" }));
 
-  // Webhook verification for Meta
-  app.get("/webhook", (req, res) => {
-    const VERIFY_TOKEN = "aventour_token_123";
+  // Webhook verification (Meta envia GET aqui)
+app.get("/webhook", (req, res) => {
+  const VERIFY_TOKEN = "aventour_token_123";
 
-    const mode = req.query["hub.mode"];
-    const token = req.query["hub.verify_token"];
-    const challenge = req.query["hub.challenge"];
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
 
-    if (mode && token === VERIFY_TOKEN) {
-      res.status(200).send(challenge);
-    } else {
-      res.sendStatus(403);
+  if (mode && token === VERIFY_TOKEN) {
+    res.status(200).send(challenge);
+  } else {
+    res.sendStatus(403);
+  }
+});
+
+// Receber mensagens do Messenger (Meta envia POST aqui)
+app.post("/webhook", async (req, res) => {
+  const body = req.body;
+
+  if (body.object === "page") {
+    for (const entry of body.entry || []) {
+      for (const event of entry.messaging || []) {
+        const senderId = event.sender?.id;
+        const messageText = event.message?.text;
+
+        if (!senderId || !messageText) continue;
+
+        console.log("Mensagem recebida:", messageText);
+
+        let replyText =
+          "Obrigado pela sua mensagem. Em instantes iremos responder.";
+
+        const text = messageText.toLowerCase();
+
+        if (
+          text.includes("preço") ||
+          text.includes("passagem") ||
+          text.includes("reserva") ||
+          text.includes("hotel") ||
+          text.includes("visto")
+        ) {
+          replyText =
+            "Recebemos o seu pedido. A nossa equipa comercial irá analisar e responder brevemente.";
+
+          try {
+            await fetch("http://localhost:" + process.env.PORT + "/api/notify", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                subject: "Novo lead Messenger",
+                body: `Mensagem: ${messageText}\nSender: ${senderId}`,
+              }),
+            });
+          } catch (error) {
+            console.error("Erro ao enviar email:", error);
+          }
+        }
+
+        try {
+          await fetch(
+            `https://graph.facebook.com/v23.0/me/messages?access_token=${process.env.PAGE_ACCESS_TOKEN}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                recipient: { id: senderId },
+                message: { text: replyText },
+              }),
+            }
+          );
+        } catch (error) {
+          console.error("Erro ao responder Messenger:", error);
+        }
+      }
     }
-  });
 
+    res.sendStatus(200);
+  } else {
+    res.sendStatus(404);
+  }
+});
   // Email notification route
   app.post("/api/notify", async (req, res) => {
     const { subject, body } = req.body;
