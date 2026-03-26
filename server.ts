@@ -145,31 +145,51 @@ app.post("/webhook", async (req, res) => {
   }
 });
   // Email notification route
-  app.post("/api/notify", async (req, res) => {
-    const { subject, body } = req.body;
-    const recipient = "reservas@viagensaventour.com";
-
-    console.log(`[EMAIL NOTIFICATION] To: ${recipient}`);
-    console.log(`Subject: ${subject}`);
-    console.log(`Body: ${body}`);
-
-    if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-      try {
-        await transporter.sendMail({
-          from: `"Aventour Bot" <${process.env.SMTP_USER}>`,
-          to: recipient,
-          subject,
-          text: body,
-        });
-        console.log("Email sent successfully.");
-      } catch (error) {
-        console.error("Failed to send real email:", error);
+  app.post("/webhook", async (req, res) => {
+    try {
+      const body = req.body;
+  
+      if (body.object !== "page") {
+        return res.sendStatus(404);
       }
-    } else {
-      console.log("SMTP credentials not provided. Email logged to console.");
+  
+      for (const entry of body.entry) {
+        const events = entry.messaging;
+  
+        for (const event of events) {
+          // Ignorar mensagens enviadas pela própria página (echo)
+          if (event.message?.is_echo) {
+            continue;
+          }
+  
+          // Ignorar delivery confirmations
+          if (event.delivery) {
+            continue;
+          }
+  
+          // Ignorar read receipts
+          if (event.read) {
+            continue;
+          }
+  
+          if (event.message?.text) {
+            const senderId = event.sender.id;
+  
+            console.log("Mensagem recebida:", event.message.text);
+  
+            await sendMessengerMessage(
+              senderId,
+              "Recebemos o seu pedido. A nossa equipa comercial irá analisar e responder brevemente."
+            );
+          }
+        }
+      }
+  
+      res.sendStatus(200);
+    } catch (error) {
+      console.error("Erro no webhook:", error);
+      res.sendStatus(500);
     }
-
-    res.json({ success: true, message: "Notificação processada." });
   });
 
   // Materials API
