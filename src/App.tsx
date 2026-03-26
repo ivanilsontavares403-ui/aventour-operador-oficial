@@ -331,6 +331,7 @@ const App: React.FC = () => {
   const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
   const [editingMaterial, setEditingMaterial] = useState<Material | null>(null);
   const [newMaterialFile, setNewMaterialFile] = useState<{ file: File, url: string } | null>(null);
+  const [sharedDataLoaded, setSharedDataLoaded] = useState(false);
   
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -379,6 +380,81 @@ const App: React.FC = () => {
       setChatSession(null); // Reset session when switching
     }
   }, [currentConversationId, allMessages]);
+  useEffect(() => {
+    const loadSharedAdminData = async () => {
+      try {
+        const [materialsRes, campaignsRes] = await Promise.all([
+          fetch("/api/materials"),
+          fetch("/api/campaigns"),
+        ]);
+  
+        const materialsData = await materialsRes.json();
+        const campaignsData = await campaignsRes.json();
+  
+        if (Array.isArray(materialsData) && materialsData.length > 0) {
+          setMaterials(
+            materialsData.map((m: any) => ({
+              ...m,
+              createdAt: new Date(m.createdAt),
+            }))
+          );
+        }
+  
+        if (Array.isArray(campaignsData) && campaignsData.length > 0) {
+          setCampaigns(
+            campaignsData.map((c: any) => ({
+              ...c,
+              createdAt: new Date(c.createdAt),
+            }))
+          );
+        }
+      } catch (error) {
+        console.error("Erro ao carregar materials/campaigns do servidor:", error);
+      } finally {
+        setSharedDataLoaded(true);
+      }
+    };
+  
+    loadSharedAdminData();
+  }, []);
+  useEffect(() => {
+    if (!sharedDataLoaded) return;
+  
+    const saveMaterialsToServer = async () => {
+      try {
+        await fetch("/api/materials", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(materials),
+        });
+      } catch (error) {
+        console.error("Erro ao guardar materials no servidor:", error);
+      }
+    };
+  
+    saveMaterialsToServer();
+  }, [materials, sharedDataLoaded]);
+  useEffect(() => {
+    if (!sharedDataLoaded) return;
+  
+    const saveCampaignsToServer = async () => {
+      try {
+        await fetch("/api/campaigns", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(campaigns),
+        });
+      } catch (error) {
+        console.error("Erro ao guardar campaigns no servidor:", error);
+      }
+    };
+  
+    saveCampaignsToServer();
+  }, [campaigns, sharedDataLoaded]);
 
   const createNewConversation = () => {
     const newId = `conv_${Date.now()}`;
