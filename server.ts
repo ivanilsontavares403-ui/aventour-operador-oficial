@@ -36,6 +36,7 @@ const dataDir = path.join(process.cwd(), "data");
 const materialsPath = path.join(dataDir, "materials.json");
 const campaignsPath = path.join(dataDir, "campaigns.json");
 const quotesPath = path.join(dataDir, "quotes.json");
+const processedMsgsPath = path.join(dataDir, "processed_messages.json");
 
 // Types
 type SessionStatus = "none" | "waiting_human" | "closed";
@@ -90,18 +91,40 @@ interface ClientSession {
 
 // State
 const sessions: Record<string, ClientSession> = {};
-const processedMessageIds = new Set<string>();
+let processedMessageIds: Set<string> = new Set();
+
+// Carrega mensagens processadas do arquivo
+async function loadProcessedMessages() {
+  try {
+    const data = await fs.readFile(processedMsgsPath, "utf-8");
+    const ids = JSON.parse(data);
+    processedMessageIds = new Set(ids);
+    console.log(`📁 Carregados ${processedMessageIds.size} IDs de mensagens processadas`);
+  } catch {
+    processedMessageIds = new Set();
+  }
+}
+
+// Salva mensagens processadas
+async function saveProcessedMessages() {
+  try {
+    await fs.writeFile(processedMsgsPath, JSON.stringify([...processedMessageIds]), "utf-8");
+  } catch (e) {
+    console.error("Erro salvando processed messages:", e);
+  }
+}
 
 // Helpers
 async function ensureDataFiles() {
   await fs.mkdir(dataDir, { recursive: true });
-  for (const file of [materialsPath, campaignsPath, quotesPath]) {
+  for (const file of [materialsPath, campaignsPath, quotesPath, processedMsgsPath]) {
     try {
       await fs.access(file);
     } catch {
       await fs.writeFile(file, JSON.stringify([], null, 2), "utf-8");
     }
   }
+  await loadProcessedMessages();
 }
 
 async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
@@ -172,8 +195,9 @@ async function sendMessengerMessage(recipientId: string, text: string, material?
   const token = process.env.PAGE_ACCESS_TOKEN;
   if (!token) throw new Error("PAGE_ACCESS_TOKEN não configurado");
 
-  // Envia texto
   const url = `https://graph.facebook.com/v23.0/me/messages?access_token=${token}`;
+  
+  // Envia texto
   await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -183,7 +207,7 @@ async function sendMessengerMessage(recipientId: string, text: string, material?
     }),
   });
 
-  // Se tiver material, envia como anexo
+  // Se tiver material, envia
   if (material) {
     if (material.fileType.startsWith("image/")) {
       await fetch(url, {
@@ -200,7 +224,6 @@ async function sendMessengerMessage(recipientId: string, text: string, material?
         }),
       });
     } else {
-      // Para PDFs e outros, envia link
       await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -215,7 +238,7 @@ async function sendMessengerMessage(recipientId: string, text: string, material?
 
 // Utils
 function isYes(text: string) {
-  return ["sim", "quero", "pode", "pode sim", "vamos", "ok", "avançar", "avancar", "claro", "confirmo", "vamos em frente"].includes(text.toLowerCase().trim());
+  return ["sim", "quero", "pode", "pode sim", "vamos", "ok", "avançar", "avancar", "claro", "confirmo", "vamos em frente", "bora"].includes(text.toLowerCase().trim());
 }
 
 function isNo(text: string) {
@@ -223,55 +246,110 @@ function isNo(text: string) {
 }
 
 function extractEmail(text: string): string | null {
-  const match = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+  const match = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/);
   return match ? match[0] : null;
 }
 
 function extractPhone(text: string): string | null {
-  const match = text.match(/\+?[0-9\s-]{9,}/);
-  return match ? match[0].replace(/\s/g, '') : null;
+  const match = text.match(/\\+?[0-9\\s-]{9,}/);
+  return match ? match[0].replace(/\\s/g, '') : null;
 }
 
 // Check campaigns dynamically
 async function checkCampaigns(text: string): Promise<{reply: string | null, material?: Material}> {
   const campaigns = await readJsonFile<Campaign[]>(campaignsPath, []);
   const materials = await readJsonFile<Material[]>(materialsPath, []);
-
+  
   const lowerText = text.toLowerCase();
-
+  
   for (const campaign of campaigns) {
     if (!campaign.active) continue;
-
+    
     const matches = campaign.keywords.some(kw => lowerText.includes(kw.toLowerCase()));
     if (matches) {
-      // Se campanha tem material associado, envia
       const material = materials.find(m => 
         campaign.context.toLowerCase().includes(m.category.toLowerCase().replace('_', ' '))
       );
-
-      let reply = `🎯 ${campaign.title}\n\n${campaign.context}`;
-      if (campaign.discount) reply += `\n\n🔥 Desconto: ${campaign.discount}`;
-      if (campaign.price) reply += `\n💰 Investimento: ${campaign.price.toLocaleString()} CVE`;
-      reply += `\n\nQuer saber mais?`;
-
+      
+      let reply = `🎯 ${campaign.title}\\n\\n${campaign.context}`;
+      if (campaign.discount) reply += `\\n\\n🔥 Desconto: ${campaign.discount}`;
+      if (campaign.price) reply += `\\n💰 Investimento: ${campaign.price.toLocaleString()} CVE`;
+      reply += `\\n\\nQuer saber mais?`;
+      
       return { reply, material };
     }
   }
-
+  
   return { reply: null };
 }
 
 // Check for pending quote
 async function checkPendingQuote(session: ClientSession): Promise<string | null> {
   if (!session.quoteId) return null;
-
+  
   const quotes = await readJsonFile<Quote[]>(quotesPath, []);
   const quote = quotes.find(q => q.id === session.quoteId && q.status === "quoted");
-
+  
   if (quote && quote.price) {
-    return `Olá ${quote.clientName}! Já tenho o valor da sua passagem para ${quote.destination}:\n\n✈️ ${quote.price}\n${quote.observation || ''}\n\nPodemos confirmar?`;
+    return `Olá ${quote.clientName}! Já tenho o valor da sua passagem para ${quote.destination}:\\n\\n✈️ ${quote.price}\\n${quote.observation || ''}\\n\\nPodemos confirmar?`;
   }
+  
+  return null;
+}
 
+// FUNÇÃO AUXILIAR: Responde perguntas de endereço/contato em QUALQUER momento
+async function checkGeneralQuestions(text: string, session: ClientSession): Promise<{text: string, material?: Material} | null> {
+  const lowerText = text.toLowerCase().trim();
+  const materials = await readJsonFile<Material[]>(materialsPath, []);
+  
+  // Endereço
+  if (lowerText.match(/endereço|endereco|onde fica|localização|morada|onde é|onde e/)) {
+    return { 
+      text: "Estamos em **Achada São Filipe, Praia**, ao lado da loja Calú e Angela. Venha nos visitar!\\n\\nPosso continuar ajudando com o seu pedido de **" + session.service.replace('_', ' ') + "**?" 
+    };
+  }
+  
+  // WhatsApp/Telefone
+  if (lowerText.match(/whatsapp|telefone|contacto|numero|número|falar/)) {
+    return { 
+      text: "Pode falar connosco pelo WhatsApp **+238 913 23 75** ou email **reservas@viagensaventour.com**.\\n\\nPosso continuar com o seu pedido de **" + session.service.replace('_', ' ') + "**?" 
+    };
+  }
+  
+  // Email
+  if (lowerText.match(/email|e-mail|correio/)) {
+    return { 
+      text: "O nosso email é **reservas@viagensaventour.com**.\\n\\nPosso continuar com o seu pedido de **" + session.service.replace('_', ' ') + "**?" 
+    };
+  }
+  
+  // Dados bancários
+  if (lowerText.match(/iban|dados bancários|conta|pagamento|transferir|como pagar/)) {
+    const material = materials.find(m => m.category === "dados_bancarios");
+    if (material) {
+      return { 
+        text: "Claro! Seguem os dados bancários da Aventour para realizar o pagamento:\\n\\nPosso continuar com o seu pedido de **" + session.service.replace('_', ' ') + "**?", 
+        material 
+      };
+    }
+  }
+  
+  // Documentos
+  if (lowerText.match(/documentos|documento|docs|papeis|papéis|lista/)) {
+    if (lowerText.match(/visto|estudante/)) {
+      const material = materials.find(m => m.category === "docs_estudante");
+      if (material) return { text: "Aqui está a lista de documentos para visto de estudante:", material };
+    }
+    if (lowerText.match(/contrato|trabalho/)) {
+      const material = materials.find(m => m.category === "docs_contrato");
+      if (material) return { text: "Documentos para agendamento de contrato:", material };
+    }
+    if (lowerText.match(/férias|ferias/)) {
+      const material = materials.find(m => m.category === "docs_ferias");
+      if (material) return { text: "Documentos para agendamento de férias:", material };
+    }
+  }
+  
   return null;
 }
 
@@ -279,8 +357,8 @@ async function checkPendingQuote(session: ClientSession): Promise<string | null>
 async function handleFlow(senderId: string, messageText: string): Promise<{text: string, material?: Material, quote?: Quote}> {
   const session = await getClientSession(senderId);
   const text = messageText.toLowerCase().trim();
-
-  // Carrega dados SEMPRE frescos (não cache)
+  
+  // Carrega dados SEMPRE frescos
   const [materials, campaigns, quotes] = await Promise.all([
     readJsonFile<Material[]>(materialsPath, []),
     readJsonFile<Campaign[]>(campaignsPath, []),
@@ -296,7 +374,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
   if (text === "reiniciar") {
     const clean = resetSession(session);
     await saveClientSession(clean);
-    return { text: "Entendido! Vamos recomeçar.\n\nPosso ajudar com:\n1. 🎓 Formação em Portugal\n2. ✈️ Agendamento de Férias\n3. 📅 Agendamento Estudante/Contrato\n4. ✈️ Passagens aéreas\n5. 🏨 Reserva de hotel\n\nQual serviço pretende?" };
+    return { text: "Entendido! Vamos recomeçar.\\n\\nPosso ajudar com:\\n1. 🎓 Formação em Portugal\\n2. ✈️ Agendamento de Férias\\n3. 📅 Agendamento Estudante/Contrato\\n4. ✈️ Passagens Aéreas\\n5. 🏨 Reserva de Hotel\\n\\nQual serviço pretende?" };
   }
 
   // Aguardando humano
@@ -308,7 +386,6 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
   if (session.quoteId) {
     const quoteReply = await checkPendingQuote(session);
     if (quoteReply) {
-      // Limpa quoteId para não repetir
       session.quoteId = undefined;
       await saveClientSession(session);
       return { text: quoteReply };
@@ -321,6 +398,12 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
     return { text: campaignResult.reply, material: campaignResult.material };
   }
 
+  // 🔥 NOVO: Verifica perguntas gerais (endereço, contato, etc) em QUALQUER momento
+  const generalReply = await checkGeneralQuestions(messageText, session);
+  if (generalReply) {
+    return generalReply;
+  }
+
   // Detecção de serviço inicial
   if (session.service === "none" || !session.step) {
     // Formação
@@ -328,7 +411,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
       session.service = "formacao";
       session.step = "formacao_idade";
       await saveClientSession(session);
-      await notifyLead("🎓 NOVO INTERESSE - Formação Portugal", `Cliente: ${senderId}\nData: ${new Date().toLocaleString()}`);
+      await notifyLead("🎓 NOVO INTERESSE - Formação Portugal", `Cliente: ${senderId}\\nData: ${new Date().toLocaleString()}`);
       return { text: "Excelente escolha! As formações em Portugal são uma oportunidade única. Para verificar a elegibilidade, qual é a sua idade?" };
     }
 
@@ -337,7 +420,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
       session.service = "ferias";
       session.step = "ferias_tipo_pessoa";
       await saveClientSession(session);
-      await notifyLead("✈️ NOVO INTERESSE - Férias", `Cliente: ${senderId}\nData: ${new Date().toLocaleString()}`);
+      await notifyLead("✈️ NOVO INTERESSE - Férias", `Cliente: ${senderId}\\nData: ${new Date().toLocaleString()}`);
       return { text: "Perfeito! O agendamento de férias inclui reserva de passagem e hotel por **20.000 CVE** (5.000 CVE reserva + 15.000 CVE após confirmação). É para si ou para outra pessoa?" };
     }
 
@@ -346,7 +429,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
       session.service = "agendamento_consular";
       session.step = "agendamento_tipo";
       await saveClientSession(session);
-      await notifyLead("📅 NOVO INTERESSE - Agendamento", `Cliente: ${senderId}\nData: ${new Date().toLocaleString()}`);
+      await notifyLead("📅 NOVO INTERESSE - Agendamento", `Cliente: ${senderId}\\nData: ${new Date().toLocaleString()}`);
       return { text: "Entendido. O agendamento consular requer presença presencial na Aventour. O valor total é **16.940 CVE** (12.500 CVE serviço + 4.440 CVE taxa consular). É para **estudante** ou **contrato de trabalho**?" };
     }
 
@@ -355,7 +438,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
       session.service = "passagem";
       session.step = "passagem_destino";
       await saveClientSession(session);
-      await notifyLead("✈️ NOVO PEDIDO - Passagem", `Cliente: ${senderId}\nData: ${new Date().toLocaleString()}`);
+      await notifyLead("✈️ NOVO PEDIDO - Passagem", `Cliente: ${senderId}\\nData: ${new Date().toLocaleString()}`);
       return { text: "Vou preparar a melhor opção para a sua viagem. Qual é o destino?" };
     }
 
@@ -364,7 +447,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
       session.service = "reserva_hotel";
       session.step = "hotel_datas";
       await saveClientSession(session);
-      await notifyLead("🏨 NOVO INTERESSE - Hotel", `Cliente: ${senderId}\nData: ${new Date().toLocaleString()}`);
+      await notifyLead("🏨 NOVO INTERESSE - Hotel", `Cliente: ${senderId}\\nData: ${new Date().toLocaleString()}`);
       return { text: "A reserva de hotel tem o custo de **60 CVE por dia**. Quais são as datas de entrada e saída?" };
     }
 
@@ -373,45 +456,12 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
       session.service = "reserva_passagem";
       session.step = "reserva_dados";
       await saveClientSession(session);
-      await notifyLead("🎫 NOVO INTERESSE - Reserva", `Cliente: ${senderId}\nData: ${new Date().toLocaleString()}`);
+      await notifyLead("🎫 NOVO INTERESSE - Reserva", `Cliente: ${senderId}\\nData: ${new Date().toLocaleString()}`);
       return { text: "A reserva de passagem custa **1.000 CVE** e garante a vaga temporariamente. Qual passagem pretende reservar?" };
     }
 
-    // Dados bancários / Pagamento - BUSCA MATERIAL ATUAL
-    if (text.match(/iban|dados bancários|conta|pagamento|transferir/)) {
-      const material = materials.find(m => m.category === "dados_bancarios");
-      if (material) {
-        return { text: "Claro! Seguem os dados bancários da Aventour:", material };
-      }
-    }
-
-    // Documentos - BUSCA MATERIAL ATUAL
-    if (text.match(/documentos|documento|docs|papeis|papéis/)) {
-      if (text.match(/visto|estudante/)) {
-        const material = materials.find(m => m.category === "docs_estudante");
-        if (material) return { text: "Aqui está a lista de documentos para visto de estudante:", material };
-      }
-      if (text.match(/contrato|trabalho/)) {
-        const material = materials.find(m => m.category === "docs_contrato");
-        if (material) return { text: "Documentos para agendamento de contrato:", material };
-      }
-      if (text.match(/férias|ferias/)) {
-        const material = materials.find(m => m.category === "docs_ferias");
-        if (material) return { text: "Documentos para agendamento de férias:", material };
-      }
-    }
-
-    // Informações gerais
-    if (text.match(/endereço|endereco|onde fica|localização/)) {
-      return { text: "Estamos em **Achada São Filipe, Praia**, ao lado da loja Calú e Angela. Venha nos visitar! Qual serviço posso ajudar?" };
-    }
-
-    if (text.match(/whatsapp|telefone|contacto/)) {
-      return { text: "Pode falar connosco pelo WhatsApp **+238 913 23 75** ou email **reservas@viagensaventour.com**. Qual serviço pretende?" };
-    }
-
     // Menu padrão
-    return { text: "Olá! Sou consultor comercial da Aventour Viagens. Posso ajudar com:\n\n1. 🎓 Formação em Portugal\n2. ✈️ Agendamento de Férias\n3. 📅 Agendamento Estudante/Contrato\n4. ✈️ Passagens Aéreas\n5. 🏨 Reserva de Hotel\n\nQual serviço pretende?" };
+    return { text: "Olá! Sou consultor comercial da Aventour Viagens. Posso ajudar com:\\n\\n1. 🎓 Formação em Portugal\\n2. ✈️ Agendamento de Férias\\n3. 📅 Agendamento Estudante/Contrato\\n4. ✈️ Passagens Aéreas\\n5. 🏨 Reserva de Hotel\\n\\nQual serviço pretende?" };
   }
 
   // FLUXO FORMAÇÃO
@@ -427,7 +477,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
       session.data.escolaridade = messageText;
       session.step = "formacao_curso";
       await saveClientSession(session);
-      return { text: "Perfeito! Temos cursos em áreas com alta empregabilidade:\n\n• Auxiliar de Ação Educativa\n• Auxiliar de Ação Médica\n• Profissional de Turismo\n• Marketing Digital\n• Assistente de Contabilidade\n• Assistente Administrativo\n\nQual área mais lhe interessa?" };
+      return { text: "Perfeito! Temos cursos em áreas com alta empregabilidade:\\n\\n• Auxiliar de Ação Educativa\\n• Auxiliar de Ação Médica\\n• Profissional de Turismo\\n• Marketing Digital\\n• Assistente de Contabilidade\\n• Assistente Administrativo\\n\\nQual área mais lhe interessa?" };
     }
 
     if (session.step === "formacao_curso") {
@@ -441,7 +491,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
       if (isYes(text)) {
         session.step = "formacao_documentos";
         await saveClientSession(session);
-        return { text: "Ótimo! Para garantir a sua vaga, preciso destes documentos:\n\n📄 Passaporte\n📄 CNI\n📄 NIF\n📄 Certificado do 9º ano (apostilado)\n\nPode enviá-los por email, WhatsApp ou trazer presencialmente. Tem todos os documentos disponíveis?" };
+        return { text: "Ótimo! Para garantir a sua vaga, preciso destes documentos:\\n\\n📄 Passaporte\\n📄 CNI\\n📄 NIF\\n📄 Certificado do 9º ano (apostilado)\\n\\nPode enviá-los por email, WhatsApp ou trazer presencialmente. Tem todos os documentos disponíveis?" };
       }
       if (isNo(text)) {
         await handoffToHuman(session, `Cliente interessado em ${session.data.curso} mas hesitou no preço.`);
@@ -452,7 +502,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
     if (session.step === "formacao_documentos") {
       if (isYes(text)) {
         const material = materials.find(m => m.category === "docs_estudante");
-        await handoffToHuman(session, `✅ FORMAÇÃO - Cliente pronto!\nCurso: ${session.data.curso}\nIdade: ${session.data.idade}\nEscolaridade: ${session.data.escolaridade}`);
+        await handoffToHuman(session, `✅ FORMAÇÃO - Cliente pronto!\\nCurso: ${session.data.curso}\\nIdade: ${session.data.idade}\\nEscolaridade: ${session.data.escolaridade}`);
         return { 
           text: "Perfeito! Já reservei a sua vaga. A nossa equipa vai contactar em breve. Aqui está a lista completa:", 
           material 
@@ -497,7 +547,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
 
     if (session.step === "ferias_morada") {
       session.data.morada = messageText;
-      await handoffToHuman(session, `✅ FÉRIAS - Lead completo!\nPara: ${session.data.para_quem}\nEmail: ${session.data.email}\nTel: ${session.data.telefone}\nTrabalho: ${session.data.local_trabalho}\nMorada: ${session.data.morada}`);
+      await handoffToHuman(session, `✅ FÉRIAS - Lead completo!\\nPara: ${session.data.para_quem}\\nEmail: ${session.data.email}\\nTel: ${session.data.telefone}\\nTrabalho: ${session.data.local_trabalho}\\nMorada: ${session.data.morada}`);
       return { text: "🎉 Excelente! Já registámos tudo. A nossa equipa vai contactar em até 24h para confirmar o agendamento." };
     }
   }
@@ -525,7 +575,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
 
     if (session.step === "agendamento_disponibilidade") {
       session.data.disponibilidade = messageText;
-      await handoffToHuman(session, `✅ AGENDAMENTO\nTipo: ${session.data.tipo}\nIdade: ${session.data.idade}\nDisponibilidade: ${session.data.disponibilidade}`);
+      await handoffToHuman(session, `✅ AGENDAMENTO\\nTipo: ${session.data.tipo}\\nIdade: ${session.data.idade}\\nDisponibilidade: ${session.data.disponibilidade}`);
       return { text: "✅ Agendamento registado! Deve comparecer à Aventour com o **passaporte original** e **comprovativo de pagamento** (12.500 CVE + 4.440 CVE)." };
     }
   }
@@ -548,8 +598,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
 
     if (session.step === "passagem_pessoas") {
       session.data.pessoas = messageText;
-
-      // Cria cotação pendente
+      
       const newQuote: Quote = {
         id: `quote_${Date.now()}`,
         clientId: senderId,
@@ -560,16 +609,16 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
-
+      
       const quotes = await readJsonFile<Quote[]>(quotesPath, []);
       quotes.push(newQuote);
       await writeJsonFile(quotesPath, quotes);
-
+      
       session.quoteId = newQuote.id;
       await saveClientSession(session);
-
-      await handoffToHuman(session, `✈️ PASSAGEM - Cotação solicitada\nDestino: ${session.data.destino}\nData: ${session.data.data}\nPessoas: ${session.data.pessoas}\n⚠️ Aguardando preço no painel admin`);
-
+      
+      await handoffToHuman(session, `✈️ PASSAGEM - Cotação solicitada\\nDestino: ${session.data.destino}\\nData: ${session.data.data}\\nPessoas: ${session.data.pessoas}`);
+      
       return { text: "🎯 Já registámos o seu pedido! A nossa equipa comercial está a verificar as melhores tarifas disponíveis. Assim que tivermos o preço, enviamos imediatamente. Enquanto isso, precisa de reserva de hotel também?", quote: newQuote };
     }
   }
@@ -585,40 +634,34 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
 
     if (session.step === "hotel_local") {
       session.data.local = messageText;
-      await handoffToHuman(session, `🏨 HOTEL - Reserva solicitada\nDatas: ${session.data.datas}\nLocal: ${session.data.local}`);
+      await handoffToHuman(session, `🏨 HOTEL - Reserva solicitada\\nDatas: ${session.data.datas}\\nLocal: ${session.data.local}`);
       return { text: `✅ Registado! Vamos verificar disponibilidade para ${session.data.local}. Custo: 60 CVE/dia. A equipa contacta em breve.` };
     }
   }
 
   // FLUXO RESERVA PASSAGEM
   if (session.service === "reserva_passagem") {
-    await handoffToHuman(session, `🎫 RESERVA DE PASSAGEM (bloqueio)\nDetalhes: ${messageText}`);
+    await handoffToHuman(session, `🎫 RESERVA DE PASSAGEM (bloqueio)\\nDetalhes: ${messageText}`);
     return { text: "✅ Pedido de reserva registado! Deve efetuar o pagamento de 1.000 CVE para garantir a vaga." };
   }
 
-  // Fallback
-  return { text: "Não consegui entender. Escreva **reiniciar** para começarmos de novo, ou diga-me qual serviço pretende: Formação, Férias, Agendamento, Passagens ou Hotel?" };
+  // Fallback - mantém o fluxo atual, não reseta
+  return { text: `Entendi. Posso ajudar com mais alguma informação sobre o seu pedido de **${session.service.replace('_', ' ')}**?\\n\\nSe quiser falar de outro serviço, escreva **reiniciar**.` };
 }
 
 // Handoff para humano
 async function handoffToHuman(session: ClientSession, summary: string) {
   session.status = "waiting_human";
   await saveClientSession(session);
-
+  
   await notifyLead(
     `🚨 LEAD QUALIFICADO - ${session.service.toUpperCase()}`,
-    `ID: ${session.senderId}\n` +
-    `Serviço: ${session.service}\n` +
-    `Dados: ${JSON.stringify(session.data, null, 2)}\n\n` +
-    `Resumo: ${summary}\n\n` +
+    `ID: ${session.senderId}\\n` +
+    `Serviço: ${session.service}\\n` +
+    `Dados: ${JSON.stringify(session.data, null, 2)}\\n\\n` +
+    `Resumo: ${summary}\\n\\n` +
     `⏰ Requer atendimento humano urgente!`
   );
-}
-
-// Deduplicação
-function rememberMessageId(mid: string) {
-  processedMessageIds.add(mid);
-  setTimeout(() => processedMessageIds.delete(mid), 10 * 60 * 1000);
 }
 
 // ==================== ROUTES ====================
@@ -636,33 +679,55 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-// Webhook Meta (Receive)
+// Webhook Meta (Receive) - CORRIGIDO: Responde 200 OK imediatamente!
 app.post("/webhook", async (req, res) => {
   const body = req.body;
   if (body.object !== "page") return res.sendStatus(404);
-
+  
+  // 🔥 CRÍTICO: Responde 200 OK IMEDIATAMENTE para evitar reenvio do Meta!
   res.sendStatus(200);
+  
+  // Processa em background (não bloqueia a resposta)
+  setImmediate(async () => {
+    try {
+      for (const entry of body.entry || []) {
+        for (const event of entry.messaging || []) {
+          if (event.message?.is_echo || event.delivery || event.read) continue;
+          
+          const senderId = event.sender?.id;
+          const messageText = event.message?.text;
+          const mid = event.message?.mid;
 
-  for (const entry of body.entry || []) {
-    for (const event of entry.messaging || []) {
-      if (event.message?.is_echo || event.delivery || event.read) continue;
+          // Deduplicação usando arquivo (persistente entre restarts)
+          if (mid) {
+            if (processedMessageIds.has(mid)) {
+              console.log(`⏩ Ignorando mensagem duplicada: ${mid}`);
+              continue;
+            }
+            processedMessageIds.add(mid);
+            // Salva a cada 10 mensagens novas
+            if (processedMessageIds.size % 10 === 0) {
+              await saveProcessedMessages();
+            }
+          }
 
-      const senderId = event.sender?.id;
-      const messageText = event.message?.text;
-      const mid = event.message?.mid;
+          if (!senderId || !messageText) continue;
 
-      if (mid && processedMessageIds.has(mid)) continue;
-      if (mid) rememberMessageId(mid);
-      if (!senderId || !messageText) continue;
+          console.log(`📩 [${senderId}]: "${messageText}"`);
 
-      try {
-        const result = await handleFlow(senderId, messageText);
-        await sendMessengerMessage(senderId, result.text, result.material);
-      } catch (error) {
-        console.error("Erro processando mensagem Meta:", error);
+          try {
+            const result = await handleFlow(senderId, messageText);
+            await sendMessengerMessage(senderId, result.text, result.material);
+            console.log(`✅ Resposta enviada para ${senderId}`);
+          } catch (error) {
+            console.error("❌ Erro processando mensagem:", error);
+          }
+        }
       }
+    } catch (error) {
+      console.error("❌ Erro geral no webhook:", error);
     }
-  }
+  });
 });
 
 // API Principal - Web App
@@ -670,11 +735,11 @@ app.post("/api/process-message", async (req, res) => {
   try {
     const { text, senderId, conversationId } = req.body;
     const id = senderId || conversationId || `web_${Date.now()}`;
-
+    
     if (!text) return res.status(400).json({ error: "Texto obrigatório" });
 
     const result = await handleFlow(id, text);
-
+    
     res.json({ 
       replyText: result.text, 
       material: result.material,
@@ -703,25 +768,23 @@ app.post("/api/quotes", async (req, res) => {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
-
+  
   const existingIndex = quotes.findIndex(q => q.id === newQuote.id);
   if (existingIndex >= 0) {
     quotes[existingIndex] = newQuote;
   } else {
     quotes.push(newQuote);
   }
-
+  
   await writeJsonFile(quotesPath, quotes);
-
-  // Se foi cotado, notifica cliente na próxima mensagem (via session.quoteId)
+  
   if (newQuote.status === "quoted" && newQuote.price) {
-    // O cliente receberá na próxima interação via checkPendingQuote
     await notifyLead(
       `💰 COTAÇÃO ENVIADA - ${newQuote.clientName}`,
-      `Destino: ${newQuote.destination}\nPreço: ${newQuote.price}\nCliente receberá na próxima mensagem.`
+      `Destino: ${newQuote.destination}\\nPreço: ${newQuote.price}\\nCliente receberá na próxima mensagem.`
     );
   }
-
+  
   res.json(newQuote);
 });
 
@@ -783,7 +846,8 @@ app.get("/api/health", (_req, res) => {
   res.json({ 
     status: "ok", 
     timestamp: new Date().toISOString(),
-    activeSessions: Object.keys(sessions).length 
+    activeSessions: Object.keys(sessions).length,
+    processedMessages: processedMessageIds.size
   });
 });
 
@@ -818,6 +882,7 @@ async function start() {
     console.log(`🚀 Aventour Server rodando em http://localhost:${PORT}`);
     console.log(`📧 Notificações: ${process.env.NOTIFY_EMAIL || process.env.SMTP_USER}`);
     console.log(`🤖 Gemini: ${process.env.GEMINI_API_KEY ? "OK" : "NÃO CONFIGURADO"}`);
+    console.log(`📁 Mensagens processadas: ${processedMessageIds.size}`);
   });
 }
 
