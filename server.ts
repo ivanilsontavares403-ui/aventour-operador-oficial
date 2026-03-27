@@ -29,7 +29,6 @@ const transporter = nodemailer.createTransport({
 const dataDir = path.join(process.cwd(), "data");
 const materialsPath = path.join(dataDir, "materials.json");
 const campaignsPath = path.join(dataDir, "campaigns.json");
-const sessionsPath = path.join(dataDir, "sessions.json");
 
 type SessionStatus = "none" | "waiting_human" | "closed";
 
@@ -49,23 +48,21 @@ type ClientSession = {
   updatedAt: string;
 };
 
-type SessionsMap = Record<string, ClientSession>;
+const sessions: Record<string, ClientSession> = {};
 
 async function ensureDataFiles() {
   await fs.mkdir(dataDir, { recursive: true });
 
-  const files = [
-    { path: materialsPath, initial: [] },
-    { path: campaignsPath, initial: [] },
-    { path: sessionsPath, initial: {} },
-  ];
+  try {
+    await fs.access(materialsPath);
+  } catch {
+    await fs.writeFile(materialsPath, JSON.stringify([], null, 2), "utf-8");
+  }
 
-  for (const file of files) {
-    try {
-      await fs.access(file.path);
-    } catch {
-      await fs.writeFile(file.path, JSON.stringify(file.initial, null, 2), "utf-8");
-    }
+  try {
+    await fs.access(campaignsPath);
+  } catch {
+    await fs.writeFile(campaignsPath, JSON.stringify([], null, 2), "utf-8");
   }
 }
 
@@ -82,13 +79,7 @@ async function writeJsonFile<T>(filePath: string, data: T) {
   await fs.writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
 
-async function getAllSessions(): Promise<SessionsMap> {
-  return await readJsonFile<SessionsMap>(sessionsPath, {});
-}
-
 async function getClientSession(senderId: string): Promise<ClientSession> {
-  const sessions = await getAllSessions();
-
   if (!sessions[senderId]) {
     sessions[senderId] = {
       senderId,
@@ -98,19 +89,16 @@ async function getClientSession(senderId: string): Promise<ClientSession> {
       data: {},
       updatedAt: new Date().toISOString(),
     };
-    await writeJsonFile(sessionsPath, sessions);
   }
 
   return sessions[senderId];
 }
 
 async function saveClientSession(session: ClientSession) {
-  const sessions = await getAllSessions();
   sessions[session.senderId] = {
     ...session,
     updatedAt: new Date().toISOString(),
   };
-  await writeJsonFile(sessionsPath, sessions);
 }
 
 function resetSession(session: ClientSession): ClientSession {
@@ -167,12 +155,28 @@ async function sendMessengerMessage(recipientId: string, text: string) {
 
 function isYes(text: string) {
   const t = text.toLowerCase().trim();
-  return ["sim", "quero", "pode", "pode sim", "vamos", "ok", "avançar", "avancar"].includes(t);
+  return [
+    "sim",
+    "quero",
+    "pode",
+    "pode sim",
+    "vamos",
+    "ok",
+    "avançar",
+    "avancar",
+  ].includes(t);
 }
 
 function isNo(text: string) {
   const t = text.toLowerCase().trim();
-  return ["não", "nao", "agora não", "agora nao", "depois", "talvez"].includes(t);
+  return [
+    "não",
+    "nao",
+    "agora não",
+    "agora nao",
+    "depois",
+    "talvez",
+  ].includes(t);
 }
 
 function buildMainMenu() {
@@ -204,6 +208,8 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
   const session = await getClientSession(senderId);
   const text = messageText.toLowerCase().trim();
 
+  console.log("SESSION ANTES:", session);
+
   if (text === "reiniciar") {
     const clean = resetSession(session);
     await saveClientSession(clean);
@@ -218,8 +224,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
   }
 
   // MENU INICIAL / DETEÇÃO DE SERVIÇO
-  if (session.status === "none" || session.service === "none" || !session.step) {
-    // Formação
+  if (session.service === "none" || !session.step) {
     if (
       text.includes("formação") ||
       text.includes("formacao") ||
@@ -230,10 +235,10 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.service = "formacao";
       session.step = "formacao_idade";
       await saveClientSession(session);
+      console.log("SESSION DEPOIS:", session);
       return "Ficamos felizes pelo seu interesse em estudar em Portugal. Qual é a sua idade?";
     }
 
-    // Férias
     if (
       text.includes("férias") ||
       text.includes("ferias") ||
@@ -244,13 +249,13 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.service = "ferias";
       session.step = "ferias_tipo_pessoa";
       await saveClientSession(session);
+      console.log("SESSION DEPOIS:", session);
       return (
         "O agendamento de férias tem o valor total de 20.000 CVE: 5.000 CVE para garantir a vaga e 15.000 CVE quando o agendamento estiver pronto. " +
         "Inclui reserva de passagem e hotel. É para si ou para outra pessoa?"
       );
     }
 
-    // Estudante / Contrato
     if (
       text.includes("agendamento estudante") ||
       text.includes("agendamento contrato") ||
@@ -262,10 +267,10 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.service = "agendamento_consular";
       session.step = "agendamento_tipo";
       await saveClientSession(session);
+      console.log("SESSION DEPOIS:", session);
       return "Pretende agendamento de estudante ou contrato de trabalho?";
     }
 
-    // Passagem
     if (
       text.includes("passagem") ||
       text.includes("voo") ||
@@ -275,10 +280,10 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.service = "passagem";
       session.step = "passagem_destino";
       await saveClientSession(session);
+      console.log("SESSION DEPOIS:", session);
       return "Para avançarmos com a cotação, indique por favor o destino.";
     }
 
-    // Contactos rápidos
     if (
       text.includes("endereço") ||
       text.includes("endereco") ||
@@ -310,6 +315,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.data.idade = messageText;
       session.step = "formacao_escolaridade";
       await saveClientSession(session);
+      console.log("SESSION DEPOIS:", session);
       return "Qual foi o último ano de escolaridade que concluiu?";
     }
 
@@ -317,6 +323,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.data.escolaridade = messageText;
       session.step = "formacao_curso";
       await saveClientSession(session);
+      console.log("SESSION DEPOIS:", session);
       return (
         "Temos as seguintes áreas disponíveis: Auxiliar de Ação Educativa, Auxiliar de Ação Médica, Profissional de Turismo, Marketing Digital, Assistente de Contabilidade e Assistente Administrativo. " +
         "Qual dessas áreas mais lhe interessa?"
@@ -327,6 +334,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.data.curso = messageText;
       session.step = "formacao_confirmacao_preco";
       await saveClientSession(session);
+      console.log("SESSION DEPOIS:", session);
       return (
         "O valor total do investimento é de 45.000 CVE: 6.000 CVE de inscrição e 39.000 CVE de declaração de matrícula. " +
         "Em Portugal pagará apenas mais 300€ para concluir. Podemos avançar?"
@@ -337,6 +345,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       if (isYes(text)) {
         session.step = "formacao_documentos";
         await saveClientSession(session);
+        console.log("SESSION DEPOIS:", session);
         return (
           "Para avançar, preciso dos seguintes documentos: Passaporte, CNI, NIF e Certificado do 9º ano apostilado. " +
           "Assim que estiver com tudo pronto, diga-me e eu encaminho o seu pedido. Consegue reunir esses documentos?"
@@ -346,6 +355,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       if (isNo(text)) {
         const clean = resetSession(session);
         await saveClientSession(clean);
+        console.log("SESSION DEPOIS:", clean);
         return "Sem problema. Quando quiser avançar, estarei disponível. Pretende tratar outro serviço?";
       }
 
@@ -358,6 +368,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
         session,
         `Cliente pronto para avançar com Formação Portugal.\nCurso: ${session.data.curso}\nIdade: ${session.data.idade}\nEscolaridade: ${session.data.escolaridade}`
       );
+      console.log("SESSION DEPOIS:", session);
       return (
         "Perfeito. O seu processo já foi encaminhado para a nossa equipa comercial para seguimento da inscrição. " +
         "Se quiser reiniciar e tratar outro serviço, escreva reiniciar. Pretende mais alguma informação?"
@@ -371,6 +382,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.data.para_quem = messageText;
       session.step = "ferias_email";
       await saveClientSession(session);
+      console.log("SESSION DEPOIS:", session);
       return "Indique por favor o email para darmos seguimento ao agendamento.";
     }
 
@@ -378,6 +390,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.data.email = messageText;
       session.step = "ferias_telefone";
       await saveClientSession(session);
+      console.log("SESSION DEPOIS:", session);
       return "Indique por favor o número de telefone.";
     }
 
@@ -385,6 +398,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.data.telefone = messageText;
       session.step = "ferias_trabalho";
       await saveClientSession(session);
+      console.log("SESSION DEPOIS:", session);
       return "Indique por favor o local de trabalho.";
     }
 
@@ -392,6 +406,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.data.local_trabalho = messageText;
       session.step = "ferias_morada";
       await saveClientSession(session);
+      console.log("SESSION DEPOIS:", session);
       return "Indique por favor a morada completa.";
     }
 
@@ -401,6 +416,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
         session,
         `Cliente pronto para Agendamento de Férias.\nPara: ${session.data.para_quem}\nEmail: ${session.data.email}\nTelefone: ${session.data.telefone}\nLocal de trabalho: ${session.data.local_trabalho}\nMorada: ${session.data.morada}`
       );
+      console.log("SESSION DEPOIS:", session);
       return (
         "Perfeito. Já registámos os seus dados para o agendamento de férias. " +
         "A nossa equipa comercial dará seguimento para garantir a vaga. Pretende mais alguma informação?"
@@ -414,6 +430,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.data.tipo_agendamento = messageText;
       session.step = "agendamento_disponibilidade";
       await saveClientSession(session);
+      console.log("SESSION DEPOIS:", session);
       return (
         "Este processo é presencial e deve comparecer à Aventour com o passaporte original. " +
         "Os valores são 4.440 CVE da taxa consular e 12.500 CVE do serviço. Qual é a sua disponibilidade para marcarmos o dia?"
@@ -426,6 +443,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
         session,
         `Cliente pronto para agendamento consular.\nTipo: ${session.data.tipo_agendamento}\nDisponibilidade: ${session.data.disponibilidade}`
       );
+      console.log("SESSION DEPOIS:", session);
       return (
         "Perfeito. A sua disponibilidade já foi encaminhada para a nossa equipa comercial, que vai orientar o próximo passo do atendimento presencial. " +
         "Pretende mais alguma informação?"
@@ -439,6 +457,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.data.destino = messageText;
       session.step = "passagem_data";
       await saveClientSession(session);
+      console.log("SESSION DEPOIS:", session);
       return "Indique por favor a data da viagem.";
     }
 
@@ -446,6 +465,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.data.data_viagem = messageText;
       session.step = "passagem_pessoas";
       await saveClientSession(session);
+      console.log("SESSION DEPOIS:", session);
       return "Indique por favor o número de pessoas.";
     }
 
@@ -455,6 +475,7 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
         session,
         `Cliente pediu cotação de passagem.\nDestino: ${session.data.destino}\nData: ${session.data.data_viagem}\nPessoas: ${session.data.numero_pessoas}`
       );
+      console.log("SESSION DEPOIS:", session);
       return (
         "Perfeito. Já registámos o seu pedido de passagem e a nossa equipa comercial vai verificar o valor atualizado. " +
         "Assim que possível, daremos seguimento. Pretende mais alguma informação?"
