@@ -80,27 +80,177 @@ async function sendMessengerMessage(recipientId: string, text: string) {
 
   return result;
 }
-
 function buildReply(messageText: string) {
-  const text = messageText.toLowerCase();
+  const text = messageText.toLowerCase().trim();
 
+  // SAUDAÇÃO
+  if (
+    text === "oi" ||
+    text === "olá" ||
+    text === "ola" ||
+    text === "bom dia" ||
+    text === "boa tarde" ||
+    text === "boa noite"
+  ) {
+    return {
+      replyText:
+        "Olá. Bem-vindo à Aventour Viagens e Turismo. Posso ajudar com passagem, reserva de hotel, visto, formação, agendamento, endereço ou contactos.",
+      notify: false,
+    };
+  }
+
+  // ENDEREÇO / LOCALIZAÇÃO
+  if (
+    text.includes("endereço") ||
+    text.includes("endereco") ||
+    text.includes("onde fica") ||
+    text.includes("localização") ||
+    text.includes("localizacao") ||
+    text.includes("morada")
+  ) {
+    return {
+      replyText:
+        "Estamos localizados em Achada São Filipe, Praia, ao lado de Calú e Angela.",
+      notify: false,
+    };
+  }
+
+  // WHATSAPP / TELEFONE / CONTACTO
+  if (
+    text.includes("whatsapp") ||
+    text.includes("telefone") ||
+    text.includes("número") ||
+    text.includes("numero") ||
+    text.includes("contacto") ||
+    text.includes("contato") ||
+    text.includes("telemóvel") ||
+    text.includes("telemovel")
+  ) {
+    return {
+      replyText:
+        "Pode falar connosco pelo WhatsApp +238 913 23 75.",
+      notify: false,
+    };
+  }
+
+  // EMAIL
+  if (
+    text.includes("email") ||
+    text.includes("e-mail")
+  ) {
+    return {
+      replyText:
+        "O nosso email é reservas@viagensaventour.com.",
+      notify: false,
+    };
+  }
+
+  // DADOS BANCÁRIOS / PAGAMENTO
+  if (
+    text.includes("dados bancários") ||
+    text.includes("dados bancarios") ||
+    text.includes("iban") ||
+    text.includes("nib") ||
+    text.includes("conta") ||
+    text.includes("dados de pagamento") ||
+    text.includes("pagamento online") ||
+    text.includes("transferência") ||
+    text.includes("transferencia")
+  ) {
+    return {
+      replyText:
+        "Posso enviar os dados bancários para pagamento. Deseja receber agora?",
+      notify: true,
+      notifySubject: "Pedido de dados bancários",
+    };
+  }
+
+  // DOCUMENTOS CONTRATO
+  if (
+    text.includes("documentos contrato") ||
+    text.includes("docs contrato") ||
+    text.includes("visto contrato") ||
+    text.includes("documentos para contrato")
+  ) {
+    return {
+      replyText:
+        "Posso enviar a lista completa de documentos para visto por contrato de trabalho. Deseja receber agora?",
+      notify: true,
+      notifySubject: "Pedido de documentos contrato",
+    };
+  }
+
+  // DOCUMENTOS ESTUDANTE
+  if (
+    text.includes("documentos estudante") ||
+    text.includes("docs estudante") ||
+    text.includes("visto estudante") ||
+    text.includes("documentos para estudante")
+  ) {
+    return {
+      replyText:
+        "Posso enviar a lista completa de documentos para visto de estudante. Deseja receber agora?",
+      notify: true,
+      notifySubject: "Pedido de documentos estudante",
+    };
+  }
+
+  // DOCUMENTOS TURISMO / FÉRIAS
+  if (
+    text.includes("documentos turismo") ||
+    text.includes("docs turismo") ||
+    text.includes("visto turismo") ||
+    text.includes("documentos férias") ||
+    text.includes("documentos ferias") ||
+    text.includes("docs férias") ||
+    text.includes("docs ferias") ||
+    text.includes("documentos para férias") ||
+    text.includes("documentos para ferias")
+  ) {
+    return {
+      replyText:
+        "Posso enviar a lista completa de documentos para visto de turismo ou férias. Deseja receber agora?",
+      notify: true,
+      notifySubject: "Pedido de documentos turismo",
+    };
+  }
+
+  // RESERVA DE PASSAGEM - DEVE VIR ANTES DE PASSAGEM
+  if (
+    text.includes("reserva de passagem") ||
+    text.includes("reservar vaga") ||
+    text.includes("bloquear vaga") ||
+    text.includes("garantir vaga")
+  ) {
+    return {
+      replyText:
+        "A reserva de passagem tem o custo de 1.000 CVE. Este valor garante a vaga temporariamente enquanto finalizamos a emissão do bilhete.",
+      notify: true,
+      notifySubject: "Interesse em reserva de passagem",
+    };
+  }
+
+  // PASSAGEM AÉREA
   if (
     text.includes("preço") ||
     text.includes("preco") ||
     text.includes("passagem") ||
     text.includes("voo") ||
-    text.includes("viajar")
+    text.includes("viajar") ||
+    text.includes("bilhete")
   ) {
     return {
       replyText:
-        "Já recebemos o seu pedido. Para avançar, indique por favor o destino, a data da viagem e o número de pessoas.",
+        "Para verificar a melhor opção disponível para a sua viagem, indique por favor o destino, a data da viagem e o número de pessoas.",
       notify: true,
       notifySubject: "Novo pedido de passagem",
     };
   }
 
+  // HOTEL
   if (
     text.includes("hotel") ||
+    text.includes("reserva hotel") ||
     text.includes("reserva de hotel")
   ) {
     return {
@@ -111,20 +261,112 @@ function buildReply(messageText: string) {
     };
   }
 
+  // AGENDAMENTO GERAL
+  if (
+    text.includes("agendamento") ||
+    text.includes("agendar") ||
+    text.includes("marcar")
+  ) {
+    return {
+      replyText:
+        "Temos agendamento para férias, estudante e contrato. Diga por favor qual é o tipo de agendamento que pretende.",
+      notify: true,
+      notifySubject: "Novo pedido de agendamento",
+    };
+  }
+
+  // FÉRIAS
+  if (
+    text.includes("férias") ||
+    text.includes("ferias") ||
+    text.includes("turismo")
+  ) {
+    return {
+      replyText:
+        "O agendamento de férias tem o valor total de 20.000 CVE: 5.000 CVE para garantir a vaga e 15.000 CVE quando o agendamento estiver pronto. Inclui reserva de passagem e reserva de hotel.",
+      notify: true,
+      notifySubject: "Interesse em agendamento de férias",
+    };
+  }
+
+  // ESTUDANTE / FORMAÇÃO
+  if (
+    text.includes("estudante") ||
+    text.includes("formação") ||
+    text.includes("formacao") ||
+    text.includes("curso") ||
+    text.includes("cursos")
+  ) {
+    return {
+      replyText:
+        "Para formações em Portugal, indique por favor a sua idade e escolaridade para verificarmos a elegibilidade.",
+      notify: true,
+      notifySubject: "Interesse em formação ou estudante",
+    };
+  }
+
+  // CONTRATO
+  if (
+    text.includes("contrato") ||
+    text.includes("trabalho")
+  ) {
+    return {
+      replyText:
+        "O agendamento para contrato é destinado a maiores de 18 anos e o atendimento é presencial. Se pretende avançar, confirme por favor a sua idade.",
+      notify: true,
+      notifySubject: "Interesse em agendamento de contrato",
+    };
+  }
+
+  // VISTO / DOCUMENTOS GERAIS
   if (
     text.includes("visto") ||
-    text.includes("documentos")
+    text.includes("documentos") ||
+    text.includes("docs") ||
+    text.includes("papéis") ||
+    text.includes("papeis")
   ) {
     return {
       replyText:
         "Posso orientar o seu processo. Diga-me por favor se pretende férias, contrato ou estudante.",
+      notify: true,
+      notifySubject: "Pedido de informação sobre visto ou documentos",
+    };
+  }
+
+  // OUTRAS ILHAS
+  if (
+    text.includes("outras ilhas") ||
+    text.includes("fora de santiago") ||
+    text.includes("ilhas")
+  ) {
+    return {
+      replyText:
+        "Para atendimento noutras ilhas fora de Santiago, trabalhamos com grupo mínimo de 20 pessoas. O pagamento é 10.000 CVE de reserva antecipada e 20.000 CVE no dia do atendimento.",
+      notify: true,
+      notifySubject: "Interesse em atendimento noutras ilhas",
+    };
+  }
+
+  // CONFIRMAÇÃO SIM
+  if (
+    text === "sim" ||
+    text === "quero" ||
+    text === "pode enviar" ||
+    text === "manda" ||
+    text === "envia"
+  ) {
+    return {
+      replyText:
+        "Perfeito. Diga por favor se pretende receber dados bancários, documentos para estudante, documentos para contrato ou documentos para turismo.",
       notify: false,
     };
   }
 
+  // RESPOSTA PADRÃO
   return {
     replyText:
-      "Obrigado pela sua mensagem. Indique por favor o serviço que pretende: passagem, reserva de hotel, visto, formação ou agendamento.",
+      "Obrigado pela sua mensagem. Posso ajudar com passagem, reserva de hotel, visto, formação, agendamento, endereço, contactos, dados bancários e documentos. Diga por favor o serviço que pretende.",
     notify: false,
   };
 }
