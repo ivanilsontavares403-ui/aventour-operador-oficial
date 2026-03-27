@@ -377,10 +377,32 @@ async function handleFlow(senderId: string, messageText: string): Promise<{text:
     return { text: "Entendido! Vamos recomeçar.\\n\\nPosso ajudar com:\\n1. 🎓 Formação em Portugal\\n2. ✈️ Agendamento de Férias\\n3. 📅 Agendamento Estudante/Contrato\\n4. ✈️ Passagens Aéreas\\n5. 🏨 Reserva de Hotel\\n\\nQual serviço pretende?" };
   }
 
-  // Aguardando humano
-  if (session.status === "waiting_human") {
-    return { text: "O seu pedido já foi encaminhado para a nossa equipa comercial. Se quiser tratar outro serviço, escreva **reiniciar**." };
+  // Aguardando humano - mas ainda responde perguntas básicas
+if (session.status === "waiting_human") {
+  // 🔥 NOVO: Mesmo em waiting_human, responde endereço/contato
+  const lowerText = text.toLowerCase().trim();
+  
+  if (lowerText.match(/endereço|endereco|onde fica|localização|morada|onde é|onde e/)) {
+    return { text: "Estamos em **Achada São Filipe, Praia**, ao lado da loja Calú e Angela. Venha nos visitar!" };
   }
+  
+  if (lowerText.match(/whatsapp|telefone|contacto|numero|número|falar/)) {
+    return { text: "Pode falar connosco pelo WhatsApp **+238 913 23 75** ou email **reservas@viagensaventour.com**." };
+  }
+  
+  if (lowerText.match(/email|e-mail|correio/)) {
+    return { text: "O nosso email é **reservas@viagensaventour.com**." };
+  }
+  
+  // Reiniciar funciona normalmente
+  if (text === "sim") {
+    const clean = resetSession(session);
+    await saveClientSession(clean);
+    return { text: "Entendido! Vamos recomeçar. Qual serviço pretende?" };
+  }
+  
+  return { text: "O seu pedido já foi encaminhado para a nossa equipa comercial. Se quiser tratar outro serviço, escreva sim" };
+}
 
   // Verifica se tem cotação pronta primeiro
   if (session.quoteId) {
