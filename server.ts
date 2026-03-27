@@ -261,6 +261,79 @@ app.post("/api/campaigns", async (req, res) => {
   await writeJsonFile(campaignsPath, req.body);
   res.json({ success: true });
 });
+app.get("/privacy-policy", (_req, res) => {
+  res.status(200).type("html").send(`
+    <!DOCTYPE html>
+    <html lang="pt">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>Política de Privacidade - Aventour Viagens e Turismo</title>
+    </head>
+    <body style="font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; line-height: 1.6; padding: 0 16px;">
+      <h1>Política de Privacidade - Aventour Viagens e Turismo</h1>
+
+      <p>A Aventour Viagens e Turismo recolhe e processa dados enviados pelos utilizadores através do website, Messenger e outros canais de contacto para responder a pedidos de informação, reservas, agendamentos e apoio ao cliente.</p>
+
+      <h2>Dados que podemos recolher</h2>
+      <ul>
+        <li>Nome</li>
+        <li>Telefone</li>
+        <li>Email</li>
+        <li>Conteúdo das mensagens enviadas</li>
+        <li>Documentos enviados pelo cliente quando necessários ao processo</li>
+      </ul>
+
+      <h2>Como usamos os dados</h2>
+      <ul>
+        <li>Responder pedidos de informação</li>
+        <li>Processar reservas e agendamentos</li>
+        <li>Prestar apoio ao cliente</li>
+        <li>Melhorar o atendimento</li>
+      </ul>
+
+      <h2>Partilha de dados</h2>
+      <p>Não vendemos dados pessoais. Os dados só podem ser partilhados quando necessário para prestação do serviço ou cumprimento de obrigações legais.</p>
+
+      <h2>Remoção de dados</h2>
+      <p>O utilizador pode solicitar a remoção dos seus dados através do email abaixo.</p>
+
+      <h2>Contacto</h2>
+      <p>reservas@viagensaventour.com</p>
+
+      <p><strong>Última atualização:</strong> 27 de março de 2026</p>
+    </body>
+    </html>
+  `);
+});
+
+app.get("/data-deletion", (_req, res) => {
+  res.status(200).type("html").send(`
+    <!DOCTYPE html>
+    <html lang="pt">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>Remoção de Dados - Aventour Viagens e Turismo</title>
+    </head>
+    <body style="font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; line-height: 1.6; padding: 0 16px;">
+      <h1>Instruções para Remoção de Dados</h1>
+
+      <p>Se deseja solicitar a remoção dos seus dados do sistema da Aventour, envie um email para:</p>
+
+      <p><strong>reservas@viagensaventour.com</strong></p>
+
+      <p>Inclua no pedido:</p>
+      <ul>
+        <li>Nome utilizado no contacto</li>
+        <li>Data aproximada da conversa</li>
+      </ul>
+
+      <p>A sua solicitação será processada no prazo máximo de 7 dias.</p>
+    </body>
+    </html>
+  `);
+});
 
 // FRONTEND
 async function start() {
