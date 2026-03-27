@@ -5,6 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import nodemailer from "nodemailer";
+import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
 
@@ -16,6 +17,10 @@ const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: "50mb" }));
 
+// Configuração do Gemini
+const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+// Configuração do Email
 const transporter = nodemailer.createTransport({
   host: "smtp.gmail.com",
   port: 465,
@@ -26,43 +31,76 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+// Data paths
 const dataDir = path.join(process.cwd(), "data");
 const materialsPath = path.join(dataDir, "materials.json");
 const campaignsPath = path.join(dataDir, "campaigns.json");
+const quotesPath = path.join(dataDir, "quotes.json");
 
+// Types
 type SessionStatus = "none" | "waiting_human" | "closed";
+type ServiceType = "none" | "formacao" | "ferias" | "agendamento_consular" | "passagem" | "reserva_hotel" | "reserva_passagem";
+type MaterialCategory = "docs_ferias" | "docs_contrato" | "docs_estudante" | "dados_bancarios" | "precario";
+type QuoteStatus = "pending" | "quoted" | "accepted" | "rejected";
 
-type ServiceType =
-  | "none"
-  | "formacao"
-  | "ferias"
-  | "agendamento_consular"
-  | "passagem";
+interface Material {
+  id: string;
+  title: string;
+  category: MaterialCategory;
+  fileUrl: string;
+  fileType: string;
+  fileName: string;
+}
 
-type ClientSession = {
+interface Campaign {
+  id: string;
+  title: string;
+  description?: string;
+  keywords: string[];
+  context: string;
+  discount?: string;
+  price?: number;
+  active: boolean;
+  createdAt: string;
+}
+
+interface Quote {
+  id: string;
+  clientId: string;
+  clientName: string;
+  destination: string;
+  details: string;
+  price?: string;
+  observation?: string;
+  status: QuoteStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface ClientSession {
   senderId: string;
   status: SessionStatus;
   service: ServiceType;
   step: string;
   data: Record<string, string>;
   updatedAt: string;
-};
+  history: Array<{role: "user" | "model", text: string}>;
+  quoteId?: string;
+}
 
+// State
 const sessions: Record<string, ClientSession> = {};
+const processedMessageIds = new Set<string>();
 
+// Helpers
 async function ensureDataFiles() {
   await fs.mkdir(dataDir, { recursive: true });
-
-  try {
-    await fs.access(materialsPath);
-  } catch {
-    await fs.writeFile(materialsPath, JSON.stringify([], null, 2), "utf-8");
-  }
-
-  try {
-    await fs.access(campaignsPath);
-  } catch {
-    await fs.writeFile(campaignsPath, JSON.stringify([], null, 2), "utf-8");
+  for (const file of [materialsPath, campaignsPath, quotesPath]) {
+    try {
+      await fs.access(file);
+    } catch {
+      await fs.writeFile(file, JSON.stringify([], null, 2), "utf-8");
+    }
   }
 }
 
@@ -88,9 +126,9 @@ async function getClientSession(senderId: string): Promise<ClientSession> {
       step: "",
       data: {},
       updatedAt: new Date().toISOString(),
+      history: [],
     };
   }
-
   return sessions[senderId];
 }
 
@@ -109,9 +147,12 @@ function resetSession(session: ClientSession): ClientSession {
     step: "",
     data: {},
     updatedAt: new Date().toISOString(),
+    history: [],
+    quoteId: undefined,
   };
 }
 
+// Email notifications
 async function notifyLead(subject: string, body: string) {
   try {
     await transporter.sendMail({
@@ -120,21 +161,20 @@ async function notifyLead(subject: string, body: string) {
       subject,
       text: body,
     });
+    console.log("✅ Email enviado:", subject);
   } catch (error) {
-    console.error("Erro ao enviar email:", error);
+    console.error("❌ Erro email:", error);
   }
 }
 
-async function sendMessengerMessage(recipientId: string, text: string) {
+// Meta Messenger
+async function sendMessengerMessage(recipientId: string, text: string, material?: Material) {
   const token = process.env.PAGE_ACCESS_TOKEN;
+  if (!token) throw new Error("PAGE_ACCESS_TOKEN não configurado");
 
-  if (!token) {
-    throw new Error("PAGE_ACCESS_TOKEN não configurado");
-  }
-
+  // Envia texto
   const url = `https://graph.facebook.com/v23.0/me/messages?access_token=${token}`;
-
-  const response = await fetch(url, {
+  await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -143,170 +183,235 @@ async function sendMessengerMessage(recipientId: string, text: string) {
     }),
   });
 
-  const result = await response.json();
-
-  if (!response.ok) {
-    console.error("Erro ao enviar para Messenger:", result);
-    throw new Error("Falha ao enviar mensagem ao Messenger");
+  // Se tiver material, envia como anexo
+  if (material) {
+    if (material.fileType.startsWith("image/")) {
+      await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recipient: { id: recipientId },
+          message: {
+            attachment: {
+              type: "image",
+              payload: { url: material.fileUrl, is_reusable: true }
+            }
+          },
+        }),
+      });
+    } else {
+      // Para PDFs e outros, envia link
+      await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recipient: { id: recipientId },
+          message: { text: `📎 ${material.title}: ${material.fileUrl}` },
+        }),
+      });
+    }
   }
-
-  return result;
 }
 
+// Utils
 function isYes(text: string) {
-  const t = text.toLowerCase().trim();
-  return [
-    "sim",
-    "quero",
-    "pode",
-    "pode sim",
-    "vamos",
-    "ok",
-    "avançar",
-    "avancar",
-  ].includes(t);
+  return ["sim", "quero", "pode", "pode sim", "vamos", "ok", "avançar", "avancar", "claro", "confirmo", "vamos em frente"].includes(text.toLowerCase().trim());
 }
 
 function isNo(text: string) {
-  const t = text.toLowerCase().trim();
-  return [
-    "não",
-    "nao",
-    "agora não",
-    "agora nao",
-    "depois",
-    "talvez",
-  ].includes(t);
+  return ["não", "nao", "agora não", "agora nao", "depois", "talvez", "não quero", "nao quero", "recuso"].includes(text.toLowerCase().trim());
 }
 
-function buildMainMenu() {
-  return (
-    "Posso ajudar com os seguintes serviços:\n\n" +
-    "1. Formação em Portugal\n" +
-    "2. Agendamento de férias\n" +
-    "3. Agendamento estudante ou contrato\n" +
-    "4. Passagens\n\n" +
-    "Qual serviço pretende?"
-  );
+function extractEmail(text: string): string | null {
+  const match = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+  return match ? match[0] : null;
 }
 
-async function handoffToHuman(session: ClientSession, summary: string) {
-  session.status = "waiting_human";
-  await saveClientSession(session);
-
-  await notifyLead(
-    `Lead pronto para atendimento humano - ${session.service}`,
-    `Sender ID: ${session.senderId}\n` +
-      `Serviço: ${session.service}\n` +
-      `Etapa: ${session.step}\n` +
-      `Dados:\n${JSON.stringify(session.data, null, 2)}\n\n` +
-      `Resumo:\n${summary}`
-  );
+function extractPhone(text: string): string | null {
+  const match = text.match(/\+?[0-9\s-]{9,}/);
+  return match ? match[0].replace(/\s/g, '') : null;
 }
 
-async function handleFlow(senderId: string, messageText: string): Promise<string> {
+// Check campaigns dynamically
+async function checkCampaigns(text: string): Promise<{reply: string | null, material?: Material}> {
+  const campaigns = await readJsonFile<Campaign[]>(campaignsPath, []);
+  const materials = await readJsonFile<Material[]>(materialsPath, []);
+
+  const lowerText = text.toLowerCase();
+
+  for (const campaign of campaigns) {
+    if (!campaign.active) continue;
+
+    const matches = campaign.keywords.some(kw => lowerText.includes(kw.toLowerCase()));
+    if (matches) {
+      // Se campanha tem material associado, envia
+      const material = materials.find(m => 
+        campaign.context.toLowerCase().includes(m.category.toLowerCase().replace('_', ' '))
+      );
+
+      let reply = `🎯 ${campaign.title}\n\n${campaign.context}`;
+      if (campaign.discount) reply += `\n\n🔥 Desconto: ${campaign.discount}`;
+      if (campaign.price) reply += `\n💰 Investimento: ${campaign.price.toLocaleString()} CVE`;
+      reply += `\n\nQuer saber mais?`;
+
+      return { reply, material };
+    }
+  }
+
+  return { reply: null };
+}
+
+// Check for pending quote
+async function checkPendingQuote(session: ClientSession): Promise<string | null> {
+  if (!session.quoteId) return null;
+
+  const quotes = await readJsonFile<Quote[]>(quotesPath, []);
+  const quote = quotes.find(q => q.id === session.quoteId && q.status === "quoted");
+
+  if (quote && quote.price) {
+    return `Olá ${quote.clientName}! Já tenho o valor da sua passagem para ${quote.destination}:\n\n✈️ ${quote.price}\n${quote.observation || ''}\n\nPodemos confirmar?`;
+  }
+
+  return null;
+}
+
+// Main Flow Handler
+async function handleFlow(senderId: string, messageText: string): Promise<{text: string, material?: Material, quote?: Quote}> {
   const session = await getClientSession(senderId);
   const text = messageText.toLowerCase().trim();
 
-  console.log("SESSION ANTES:", session);
+  // Carrega dados SEMPRE frescos (não cache)
+  const [materials, campaigns, quotes] = await Promise.all([
+    readJsonFile<Material[]>(materialsPath, []),
+    readJsonFile<Campaign[]>(campaignsPath, []),
+    readJsonFile<Quote[]>(quotesPath, []),
+  ]);
 
+  console.log(`[${senderId}] "${messageText}" | Serviço: ${session.service} | Etapa: ${session.step}`);
+
+  // Adiciona ao histórico
+  session.history.push({ role: "user", text: messageText });
+
+  // Comando reiniciar
   if (text === "reiniciar") {
     const clean = resetSession(session);
     await saveClientSession(clean);
-    return "A conversa foi reiniciada. " + buildMainMenu();
+    return { text: "Entendido! Vamos recomeçar.\n\nPosso ajudar com:\n1. 🎓 Formação em Portugal\n2. ✈️ Agendamento de Férias\n3. 📅 Agendamento Estudante/Contrato\n4. ✈️ Passagens aéreas\n5. 🏨 Reserva de hotel\n\nQual serviço pretende?" };
   }
 
+  // Aguardando humano
   if (session.status === "waiting_human") {
-    return (
-      "O seu pedido já foi encaminhado para a nossa equipa comercial. " +
-      "Se quiser reiniciar e tratar outro serviço, escreva reiniciar. Qual serviço pretende agora?"
-    );
+    return { text: "O seu pedido já foi encaminhado para a nossa equipa comercial. Se quiser tratar outro serviço, escreva **reiniciar**." };
   }
 
-  // MENU INICIAL / DETEÇÃO DE SERVIÇO
+  // Verifica se tem cotação pronta primeiro
+  if (session.quoteId) {
+    const quoteReply = await checkPendingQuote(session);
+    if (quoteReply) {
+      // Limpa quoteId para não repetir
+      session.quoteId = undefined;
+      await saveClientSession(session);
+      return { text: quoteReply };
+    }
+  }
+
+  // Verifica campanhas ativas (keywords)
+  const campaignResult = await checkCampaigns(messageText);
+  if (campaignResult.reply && session.service === "none") {
+    return { text: campaignResult.reply, material: campaignResult.material };
+  }
+
+  // Detecção de serviço inicial
   if (session.service === "none" || !session.step) {
-    if (
-      text.includes("formação") ||
-      text.includes("formacao") ||
-      text.includes("estudar") ||
-      text.includes("curso") ||
-      text.includes("cursos")
-    ) {
+    // Formação
+    if (text.match(/formação|formacao|estudar|curso/)) {
       session.service = "formacao";
       session.step = "formacao_idade";
       await saveClientSession(session);
-      console.log("SESSION DEPOIS:", session);
-      return "Ficamos felizes pelo seu interesse em estudar em Portugal. Qual é a sua idade?";
+      await notifyLead("🎓 NOVO INTERESSE - Formação Portugal", `Cliente: ${senderId}\nData: ${new Date().toLocaleString()}`);
+      return { text: "Excelente escolha! As formações em Portugal são uma oportunidade única. Para verificar a elegibilidade, qual é a sua idade?" };
     }
 
-    if (
-      text.includes("férias") ||
-      text.includes("ferias") ||
-      text.includes("turismo") ||
-      text.includes("agendamento de férias") ||
-      text.includes("agendamento de ferias")
-    ) {
+    // Férias
+    if (text.match(/férias|ferias|turismo|lazer/)) {
       session.service = "ferias";
       session.step = "ferias_tipo_pessoa";
       await saveClientSession(session);
-      console.log("SESSION DEPOIS:", session);
-      return (
-        "O agendamento de férias tem o valor total de 20.000 CVE: 5.000 CVE para garantir a vaga e 15.000 CVE quando o agendamento estiver pronto. " +
-        "Inclui reserva de passagem e hotel. É para si ou para outra pessoa?"
-      );
+      await notifyLead("✈️ NOVO INTERESSE - Férias", `Cliente: ${senderId}\nData: ${new Date().toLocaleString()}`);
+      return { text: "Perfeito! O agendamento de férias inclui reserva de passagem e hotel por **20.000 CVE** (5.000 CVE reserva + 15.000 CVE após confirmação). É para si ou para outra pessoa?" };
     }
 
-    if (
-      text.includes("agendamento estudante") ||
-      text.includes("agendamento contrato") ||
-      text.includes("contrato") ||
-      text.includes("trabalho") ||
-      text.includes("consulado") ||
-      text.includes("estudante")
-    ) {
+    // Agendamento Consular
+    if (text.match(/agendamento|visto|consulado|entrevista|contrato/)) {
       session.service = "agendamento_consular";
       session.step = "agendamento_tipo";
       await saveClientSession(session);
-      console.log("SESSION DEPOIS:", session);
-      return "Pretende agendamento de estudante ou contrato de trabalho?";
+      await notifyLead("📅 NOVO INTERESSE - Agendamento", `Cliente: ${senderId}\nData: ${new Date().toLocaleString()}`);
+      return { text: "Entendido. O agendamento consular requer presença presencial na Aventour. O valor total é **16.940 CVE** (12.500 CVE serviço + 4.440 CVE taxa consular). É para **estudante** ou **contrato de trabalho**?" };
     }
 
-    if (
-      text.includes("passagem") ||
-      text.includes("voo") ||
-      text.includes("bilhete") ||
-      text.includes("viajar")
-    ) {
+    // Passagem
+    if (text.match(/passagem|voo|bilhete|avião|voar|viajar/)) {
       session.service = "passagem";
       session.step = "passagem_destino";
       await saveClientSession(session);
-      console.log("SESSION DEPOIS:", session);
-      return "Para avançarmos com a cotação, indique por favor o destino.";
+      await notifyLead("✈️ NOVO PEDIDO - Passagem", `Cliente: ${senderId}\nData: ${new Date().toLocaleString()}`);
+      return { text: "Vou preparar a melhor opção para a sua viagem. Qual é o destino?" };
     }
 
-    if (
-      text.includes("endereço") ||
-      text.includes("endereco") ||
-      text.includes("onde fica") ||
-      text.includes("morada")
-    ) {
-      return "Estamos localizados em Achada São Filipe, Praia, ao lado de Calú e Angela. Qual serviço pretende?";
+    // Hotel
+    if (text.match(/hotel|hospedagem|alojamento/)) {
+      session.service = "reserva_hotel";
+      session.step = "hotel_datas";
+      await saveClientSession(session);
+      await notifyLead("🏨 NOVO INTERESSE - Hotel", `Cliente: ${senderId}\nData: ${new Date().toLocaleString()}`);
+      return { text: "A reserva de hotel tem o custo de **60 CVE por dia**. Quais são as datas de entrada e saída?" };
     }
 
-    if (
-      text.includes("whatsapp") ||
-      text.includes("telefone") ||
-      text.includes("numero") ||
-      text.includes("número")
-    ) {
-      return "Pode falar connosco pelo WhatsApp +238 913 23 75. Qual serviço pretende?";
+    // Reserva de Passagem
+    if (text.match(/reservar vaga|bloquear|garantir vaga/)) {
+      session.service = "reserva_passagem";
+      session.step = "reserva_dados";
+      await saveClientSession(session);
+      await notifyLead("🎫 NOVO INTERESSE - Reserva", `Cliente: ${senderId}\nData: ${new Date().toLocaleString()}`);
+      return { text: "A reserva de passagem custa **1.000 CVE** e garante a vaga temporariamente. Qual passagem pretende reservar?" };
     }
 
-    if (text.includes("email") || text.includes("e-mail")) {
-      return "O nosso email é reservas@viagensaventour.com. Qual serviço pretende?";
+    // Dados bancários / Pagamento - BUSCA MATERIAL ATUAL
+    if (text.match(/iban|dados bancários|conta|pagamento|transferir/)) {
+      const material = materials.find(m => m.category === "dados_bancarios");
+      if (material) {
+        return { text: "Claro! Seguem os dados bancários da Aventour:", material };
+      }
     }
 
-    return buildMainMenu();
+    // Documentos - BUSCA MATERIAL ATUAL
+    if (text.match(/documentos|documento|docs|papeis|papéis/)) {
+      if (text.match(/visto|estudante/)) {
+        const material = materials.find(m => m.category === "docs_estudante");
+        if (material) return { text: "Aqui está a lista de documentos para visto de estudante:", material };
+      }
+      if (text.match(/contrato|trabalho/)) {
+        const material = materials.find(m => m.category === "docs_contrato");
+        if (material) return { text: "Documentos para agendamento de contrato:", material };
+      }
+      if (text.match(/férias|ferias/)) {
+        const material = materials.find(m => m.category === "docs_ferias");
+        if (material) return { text: "Documentos para agendamento de férias:", material };
+      }
+    }
+
+    // Informações gerais
+    if (text.match(/endereço|endereco|onde fica|localização/)) {
+      return { text: "Estamos em **Achada São Filipe, Praia**, ao lado da loja Calú e Angela. Venha nos visitar! Qual serviço posso ajudar?" };
+    }
+
+    if (text.match(/whatsapp|telefone|contacto/)) {
+      return { text: "Pode falar connosco pelo WhatsApp **+238 913 23 75** ou email **reservas@viagensaventour.com**. Qual serviço pretende?" };
+    }
+
+    // Menu padrão
+    return { text: "Olá! Sou consultor comercial da Aventour Viagens. Posso ajudar com:\n\n1. 🎓 Formação em Portugal\n2. ✈️ Agendamento de Férias\n3. 📅 Agendamento Estudante/Contrato\n4. ✈️ Passagens Aéreas\n5. 🏨 Reserva de Hotel\n\nQual serviço pretende?" };
   }
 
   // FLUXO FORMAÇÃO
@@ -315,64 +420,46 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.data.idade = messageText;
       session.step = "formacao_escolaridade";
       await saveClientSession(session);
-      console.log("SESSION DEPOIS:", session);
-      return "Qual foi o último ano de escolaridade que concluiu?";
+      return { text: "Obrigado. Qual foi o último ano de escolaridade que concluiu?" };
     }
 
     if (session.step === "formacao_escolaridade") {
       session.data.escolaridade = messageText;
       session.step = "formacao_curso";
       await saveClientSession(session);
-      console.log("SESSION DEPOIS:", session);
-      return (
-        "Temos as seguintes áreas disponíveis: Auxiliar de Ação Educativa, Auxiliar de Ação Médica, Profissional de Turismo, Marketing Digital, Assistente de Contabilidade e Assistente Administrativo. " +
-        "Qual dessas áreas mais lhe interessa?"
-      );
+      return { text: "Perfeito! Temos cursos em áreas com alta empregabilidade:\n\n• Auxiliar de Ação Educativa\n• Auxiliar de Ação Médica\n• Profissional de Turismo\n• Marketing Digital\n• Assistente de Contabilidade\n• Assistente Administrativo\n\nQual área mais lhe interessa?" };
     }
 
     if (session.step === "formacao_curso") {
       session.data.curso = messageText;
-      session.step = "formacao_confirmacao_preco";
+      session.step = "formacao_preco";
       await saveClientSession(session);
-      console.log("SESSION DEPOIS:", session);
-      return (
-        "O valor total do investimento é de 45.000 CVE: 6.000 CVE de inscrição e 39.000 CVE de declaração de matrícula. " +
-        "Em Portugal pagará apenas mais 300€ para concluir. Podemos avançar?"
-      );
+      return { text: "Excelente escolha! O investimento total é de **45.000 CVE** (6.000 CVE inscrição + 39.000 CVE matrícula). Em Portugal paga apenas mais **300€** para concluir. Não há mensalidades! Podemos avançar?" };
     }
 
-    if (session.step === "formacao_confirmacao_preco") {
+    if (session.step === "formacao_preco") {
       if (isYes(text)) {
         session.step = "formacao_documentos";
         await saveClientSession(session);
-        console.log("SESSION DEPOIS:", session);
-        return (
-          "Para avançar, preciso dos seguintes documentos: Passaporte, CNI, NIF e Certificado do 9º ano apostilado. " +
-          "Assim que estiver com tudo pronto, diga-me e eu encaminho o seu pedido. Consegue reunir esses documentos?"
-        );
+        return { text: "Ótimo! Para garantir a sua vaga, preciso destes documentos:\n\n📄 Passaporte\n📄 CNI\n📄 NIF\n📄 Certificado do 9º ano (apostilado)\n\nPode enviá-los por email, WhatsApp ou trazer presencialmente. Tem todos os documentos disponíveis?" };
       }
-
       if (isNo(text)) {
-        const clean = resetSession(session);
-        await saveClientSession(clean);
-        console.log("SESSION DEPOIS:", clean);
-        return "Sem problema. Quando quiser avançar, estarei disponível. Pretende tratar outro serviço?";
+        await handoffToHuman(session, `Cliente interessado em ${session.data.curso} mas hesitou no preço.`);
+        return { text: "Entendo, é um investimento importante. Vou encaminhar para um consultor que pode explicar melhor as condições de pagamento." };
       }
-
-      return "Para eu continuar corretamente, diga-me por favor se deseja avançar com a formação. Podemos seguir?";
     }
 
     if (session.step === "formacao_documentos") {
-      session.data.documentos_confirmados = messageText;
-      await handoffToHuman(
-        session,
-        `Cliente pronto para avançar com Formação Portugal.\nCurso: ${session.data.curso}\nIdade: ${session.data.idade}\nEscolaridade: ${session.data.escolaridade}`
-      );
-      console.log("SESSION DEPOIS:", session);
-      return (
-        "Perfeito. O seu processo já foi encaminhado para a nossa equipa comercial para seguimento da inscrição. " +
-        "Se quiser reiniciar e tratar outro serviço, escreva reiniciar. Pretende mais alguma informação?"
-      );
+      if (isYes(text)) {
+        const material = materials.find(m => m.category === "docs_estudante");
+        await handoffToHuman(session, `✅ FORMAÇÃO - Cliente pronto!\nCurso: ${session.data.curso}\nIdade: ${session.data.idade}\nEscolaridade: ${session.data.escolaridade}`);
+        return { 
+          text: "Perfeito! Já reservei a sua vaga. A nossa equipa vai contactar em breve. Aqui está a lista completa:", 
+          material 
+        };
+      }
+      await handoffToHuman(session, `Cliente em formação, aguardando documentos: ${messageText}`);
+      return { text: "Sem problema. Assim que tiver os documentos prontos, envie-nos que damos seguimento imediato." };
     }
   }
 
@@ -382,72 +469,64 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.data.para_quem = messageText;
       session.step = "ferias_email";
       await saveClientSession(session);
-      console.log("SESSION DEPOIS:", session);
-      return "Indique por favor o email para darmos seguimento ao agendamento.";
+      return { text: "Entendido. Qual é o email para enviarmos a confirmação?" };
     }
 
     if (session.step === "ferias_email") {
-      session.data.email = messageText;
+      const email = extractEmail(messageText);
+      session.data.email = email || messageText;
       session.step = "ferias_telefone";
       await saveClientSession(session);
-      console.log("SESSION DEPOIS:", session);
-      return "Indique por favor o número de telefone.";
+      return { text: "Perfeito. Qual é o número de telefone?" };
     }
 
     if (session.step === "ferias_telefone") {
-      session.data.telefone = messageText;
+      const phone = extractPhone(messageText);
+      session.data.telefone = phone || messageText;
       session.step = "ferias_trabalho";
       await saveClientSession(session);
-      console.log("SESSION DEPOIS:", session);
-      return "Indique por favor o local de trabalho.";
+      return { text: "Obrigado. Qual é o local de trabalho?" };
     }
 
     if (session.step === "ferias_trabalho") {
       session.data.local_trabalho = messageText;
       session.step = "ferias_morada";
       await saveClientSession(session);
-      console.log("SESSION DEPOIS:", session);
-      return "Indique por favor a morada completa.";
+      return { text: "Qual é a morada completa?" };
     }
 
     if (session.step === "ferias_morada") {
       session.data.morada = messageText;
-      await handoffToHuman(
-        session,
-        `Cliente pronto para Agendamento de Férias.\nPara: ${session.data.para_quem}\nEmail: ${session.data.email}\nTelefone: ${session.data.telefone}\nLocal de trabalho: ${session.data.local_trabalho}\nMorada: ${session.data.morada}`
-      );
-      console.log("SESSION DEPOIS:", session);
-      return (
-        "Perfeito. Já registámos os seus dados para o agendamento de férias. " +
-        "A nossa equipa comercial dará seguimento para garantir a vaga. Pretende mais alguma informação?"
-      );
+      await handoffToHuman(session, `✅ FÉRIAS - Lead completo!\nPara: ${session.data.para_quem}\nEmail: ${session.data.email}\nTel: ${session.data.telefone}\nTrabalho: ${session.data.local_trabalho}\nMorada: ${session.data.morada}`);
+      return { text: "🎉 Excelente! Já registámos tudo. A nossa equipa vai contactar em até 24h para confirmar o agendamento." };
     }
   }
 
-  // FLUXO AGENDAMENTO ESTUDANTE / CONTRATO
+  // FLUXO AGENDAMENTO CONSULAR
   if (session.service === "agendamento_consular") {
     if (session.step === "agendamento_tipo") {
-      session.data.tipo_agendamento = messageText;
+      session.data.tipo = text.includes("estudante") ? "estudante" : "contrato";
+      session.step = "agendamento_idade";
+      await saveClientSession(session);
+      return { text: "Qual é a idade do solicitante? (Apenas 18+ anos podem agendar)" };
+    }
+
+    if (session.step === "agendamento_idade") {
+      const idade = parseInt(messageText);
+      if (idade < 18) {
+        await handoffToHuman(session, `Menor de idade tentou agendamento: ${messageText}`);
+        return { text: "Para menores de 18 anos, o processo é diferente. Vou encaminhar para um consultor especializado." };
+      }
+      session.data.idade = messageText;
       session.step = "agendamento_disponibilidade";
       await saveClientSession(session);
-      console.log("SESSION DEPOIS:", session);
-      return (
-        "Este processo é presencial e deve comparecer à Aventour com o passaporte original. " +
-        "Os valores são 4.440 CVE da taxa consular e 12.500 CVE do serviço. Qual é a sua disponibilidade para marcarmos o dia?"
-      );
+      return { text: "Perfeito. Qual é a disponibilidade para o atendimento presencial? (Ex: esta semana, próxima semana)" };
     }
 
     if (session.step === "agendamento_disponibilidade") {
       session.data.disponibilidade = messageText;
-      await handoffToHuman(
-        session,
-        `Cliente pronto para agendamento consular.\nTipo: ${session.data.tipo_agendamento}\nDisponibilidade: ${session.data.disponibilidade}`
-      );
-      console.log("SESSION DEPOIS:", session);
-      return (
-        "Perfeito. A sua disponibilidade já foi encaminhada para a nossa equipa comercial, que vai orientar o próximo passo do atendimento presencial. " +
-        "Pretende mais alguma informação?"
-      );
+      await handoffToHuman(session, `✅ AGENDAMENTO\nTipo: ${session.data.tipo}\nIdade: ${session.data.idade}\nDisponibilidade: ${session.data.disponibilidade}`);
+      return { text: "✅ Agendamento registado! Deve comparecer à Aventour com o **passaporte original** e **comprovativo de pagamento** (12.500 CVE + 4.440 CVE)." };
     }
   }
 
@@ -457,39 +536,96 @@ async function handleFlow(senderId: string, messageText: string): Promise<string
       session.data.destino = messageText;
       session.step = "passagem_data";
       await saveClientSession(session);
-      console.log("SESSION DEPOIS:", session);
-      return "Indique por favor a data da viagem.";
+      return { text: "Qual é a data pretendida para a viagem?" };
     }
 
     if (session.step === "passagem_data") {
-      session.data.data_viagem = messageText;
+      session.data.data = messageText;
       session.step = "passagem_pessoas";
       await saveClientSession(session);
-      console.log("SESSION DEPOIS:", session);
-      return "Indique por favor o número de pessoas.";
+      return { text: "Quantas pessoas vão viajar?" };
     }
 
     if (session.step === "passagem_pessoas") {
-      session.data.numero_pessoas = messageText;
-      await handoffToHuman(
-        session,
-        `Cliente pediu cotação de passagem.\nDestino: ${session.data.destino}\nData: ${session.data.data_viagem}\nPessoas: ${session.data.numero_pessoas}`
-      );
-      console.log("SESSION DEPOIS:", session);
-      return (
-        "Perfeito. Já registámos o seu pedido de passagem e a nossa equipa comercial vai verificar o valor atualizado. " +
-        "Assim que possível, daremos seguimento. Pretende mais alguma informação?"
-      );
+      session.data.pessoas = messageText;
+
+      // Cria cotação pendente
+      const newQuote: Quote = {
+        id: `quote_${Date.now()}`,
+        clientId: senderId,
+        clientName: session.data.nome || "Cliente",
+        destination: session.data.destino,
+        details: `Data: ${session.data.data}, Pessoas: ${session.data.pessoas}`,
+        status: "pending",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      const quotes = await readJsonFile<Quote[]>(quotesPath, []);
+      quotes.push(newQuote);
+      await writeJsonFile(quotesPath, quotes);
+
+      session.quoteId = newQuote.id;
+      await saveClientSession(session);
+
+      await handoffToHuman(session, `✈️ PASSAGEM - Cotação solicitada\nDestino: ${session.data.destino}\nData: ${session.data.data}\nPessoas: ${session.data.pessoas}\n⚠️ Aguardando preço no painel admin`);
+
+      return { text: "🎯 Já registámos o seu pedido! A nossa equipa comercial está a verificar as melhores tarifas disponíveis. Assim que tivermos o preço, enviamos imediatamente. Enquanto isso, precisa de reserva de hotel também?", quote: newQuote };
     }
   }
 
-  return "Não consegui avançar corretamente com o seu pedido. Escreva reiniciar para começarmos de novo. Qual serviço pretende?";
+  // FLUXO HOTEL
+  if (session.service === "reserva_hotel") {
+    if (session.step === "hotel_datas") {
+      session.data.datas = messageText;
+      session.step = "hotel_local";
+      await saveClientSession(session);
+      return { text: "Qual é o destino/hotel pretendido?" };
+    }
+
+    if (session.step === "hotel_local") {
+      session.data.local = messageText;
+      await handoffToHuman(session, `🏨 HOTEL - Reserva solicitada\nDatas: ${session.data.datas}\nLocal: ${session.data.local}`);
+      return { text: `✅ Registado! Vamos verificar disponibilidade para ${session.data.local}. Custo: 60 CVE/dia. A equipa contacta em breve.` };
+    }
+  }
+
+  // FLUXO RESERVA PASSAGEM
+  if (session.service === "reserva_passagem") {
+    await handoffToHuman(session, `🎫 RESERVA DE PASSAGEM (bloqueio)\nDetalhes: ${messageText}`);
+    return { text: "✅ Pedido de reserva registado! Deve efetuar o pagamento de 1.000 CVE para garantir a vaga." };
+  }
+
+  // Fallback
+  return { text: "Não consegui entender. Escreva **reiniciar** para começarmos de novo, ou diga-me qual serviço pretende: Formação, Férias, Agendamento, Passagens ou Hotel?" };
 }
 
-// WEBHOOK VERIFY
+// Handoff para humano
+async function handoffToHuman(session: ClientSession, summary: string) {
+  session.status = "waiting_human";
+  await saveClientSession(session);
+
+  await notifyLead(
+    `🚨 LEAD QUALIFICADO - ${session.service.toUpperCase()}`,
+    `ID: ${session.senderId}\n` +
+    `Serviço: ${session.service}\n` +
+    `Dados: ${JSON.stringify(session.data, null, 2)}\n\n` +
+    `Resumo: ${summary}\n\n` +
+    `⏰ Requer atendimento humano urgente!`
+  );
+}
+
+// Deduplicação
+function rememberMessageId(mid: string) {
+  processedMessageIds.add(mid);
+  setTimeout(() => processedMessageIds.delete(mid), 10 * 60 * 1000);
+}
+
+// ==================== ROUTES ====================
+
+// Webhook Meta (Verify)
 app.get("/webhook", (req, res) => {
   const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || "aventour_token_123";
-
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
@@ -497,105 +633,121 @@ app.get("/webhook", (req, res) => {
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
     return res.status(200).send(challenge);
   }
-
   return res.sendStatus(403);
 });
 
-// DEDUP BÁSICO EM MEMÓRIA
-const processedMessageIds = new Set<string>();
-
-function rememberMessageId(mid: string) {
-  processedMessageIds.add(mid);
-  setTimeout(() => processedMessageIds.delete(mid), 10 * 60 * 1000);
-}
-
-// WEBHOOK RECEIVE
+// Webhook Meta (Receive)
 app.post("/webhook", async (req, res) => {
   const body = req.body;
-
-  if (body.object !== "page") {
-    return res.sendStatus(404);
-  }
+  if (body.object !== "page") return res.sendStatus(404);
 
   res.sendStatus(200);
 
-  try {
-    for (const entry of body.entry || []) {
-      for (const event of entry.messaging || []) {
-        if (event.message?.is_echo) continue;
-        if (event.delivery) continue;
-        if (event.read) continue;
+  for (const entry of body.entry || []) {
+    for (const event of entry.messaging || []) {
+      if (event.message?.is_echo || event.delivery || event.read) continue;
 
-        const senderId = event.sender?.id;
-        const messageText = event.message?.text;
-        const mid = event.message?.mid;
+      const senderId = event.sender?.id;
+      const messageText = event.message?.text;
+      const mid = event.message?.mid;
 
-        if (mid) {
-          if (processedMessageIds.has(mid)) continue;
-          rememberMessageId(mid);
-        }
+      if (mid && processedMessageIds.has(mid)) continue;
+      if (mid) rememberMessageId(mid);
+      if (!senderId || !messageText) continue;
 
-        if (!senderId || !messageText) continue;
-
-        console.log("Mensagem recebida do Messenger:", messageText);
-
-        try {
-          const replyText = await handleFlow(senderId, messageText);
-          if (replyText) {
-            await sendMessengerMessage(senderId, replyText);
-          }
-        } catch (innerError) {
-          console.error("Erro ao processar evento individual:", innerError);
-        }
+      try {
+        const result = await handleFlow(senderId, messageText);
+        await sendMessengerMessage(senderId, result.text, result.material);
+      } catch (error) {
+        console.error("Erro processando mensagem Meta:", error);
       }
     }
-  } catch (error) {
-    console.error("Erro geral no webhook:", error);
   }
 });
 
-// API CENTRAL PARA O WEB APP
+// API Principal - Web App
 app.post("/api/process-message", async (req, res) => {
   try {
-    const { text, senderId } = req.body;
+    const { text, senderId, conversationId } = req.body;
+    const id = senderId || conversationId || `web_${Date.now()}`;
 
-    if (!text || !senderId) {
-      return res.status(400).json({ error: "text e senderId são obrigatórios" });
-    }
+    if (!text) return res.status(400).json({ error: "Texto obrigatório" });
 
-    const replyText = await handleFlow(String(senderId), String(text));
+    const result = await handleFlow(id, text);
 
-    return res.json({ replyText });
+    res.json({ 
+      replyText: result.text, 
+      material: result.material,
+      quote: result.quote,
+      senderId: id 
+    });
   } catch (error) {
-    console.error("Erro em /api/process-message:", error);
-    return res.status(500).json({
-      replyText: "Tivemos um problema técnico. Escreva reiniciar e tente novamente. Qual serviço pretende?",
+    console.error("Erro API:", error);
+    res.status(500).json({ 
+      replyText: "Tivemos um problema técnico. Escreva 'reiniciar' para tentarmos novamente." 
     });
   }
 });
 
-// EMAIL
-app.post("/api/notify", async (req, res) => {
-  try {
-    const { subject, body } = req.body;
-
-    await transporter.sendMail({
-      from: process.env.SMTP_USER,
-      to: process.env.NOTIFY_EMAIL || process.env.SMTP_USER,
-      subject,
-      text: body,
-    });
-
-    return res.json({ success: true });
-  } catch (error) {
-    console.error("Erro ao enviar email:", error);
-    return res.status(500).json({ success: false });
-  }
+// API - Quotes (Preços)
+app.get("/api/quotes", async (_req, res) => {
+  const quotes = await readJsonFile<Quote[]>(quotesPath, []);
+  res.json(quotes.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()));
 });
 
-// MATERIALS
+app.post("/api/quotes", async (req, res) => {
+  const quotes = await readJsonFile<Quote[]>(quotesPath, []);
+  const newQuote: Quote = {
+    ...req.body,
+    id: req.body.id || `quote_${Date.now()}`,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const existingIndex = quotes.findIndex(q => q.id === newQuote.id);
+  if (existingIndex >= 0) {
+    quotes[existingIndex] = newQuote;
+  } else {
+    quotes.push(newQuote);
+  }
+
+  await writeJsonFile(quotesPath, quotes);
+
+  // Se foi cotado, notifica cliente na próxima mensagem (via session.quoteId)
+  if (newQuote.status === "quoted" && newQuote.price) {
+    // O cliente receberá na próxima interação via checkPendingQuote
+    await notifyLead(
+      `💰 COTAÇÃO ENVIADA - ${newQuote.clientName}`,
+      `Destino: ${newQuote.destination}\nPreço: ${newQuote.price}\nCliente receberá na próxima mensagem.`
+    );
+  }
+
+  res.json(newQuote);
+});
+
+// API - Sessions
+app.get("/api/sessions", async (_req, res) => {
+  const activeSessions = Object.values(sessions)
+    .filter(s => s.status !== "closed")
+    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  res.json(activeSessions);
+});
+
+app.get("/api/session/:senderId", async (req, res) => {
+  const session = await getClientSession(req.params.senderId);
+  res.json(session);
+});
+
+app.post("/api/session/:senderId/reset", async (req, res) => {
+  const session = await getClientSession(req.params.senderId);
+  const clean = resetSession(session);
+  await saveClientSession(clean);
+  res.json({ success: true });
+});
+
+// Materials API
 app.get("/api/materials", async (_req, res) => {
-  const materials = await readJsonFile(materialsPath, []);
+  const materials = await readJsonFile<Material[]>(materialsPath, []);
   res.json(materials);
 });
 
@@ -604,9 +756,9 @@ app.post("/api/materials", async (req, res) => {
   res.json({ success: true });
 });
 
-// CAMPAIGNS
+// Campaigns API
 app.get("/api/campaigns", async (_req, res) => {
-  const campaigns = await readJsonFile(campaignsPath, []);
+  const campaigns = await readJsonFile<Campaign[]>(campaignsPath, []);
   res.json(campaigns);
 });
 
@@ -615,73 +767,36 @@ app.post("/api/campaigns", async (req, res) => {
   res.json({ success: true });
 });
 
-// PÁGINAS PÚBLICAS
+// Email test
+app.post("/api/notify", async (req, res) => {
+  try {
+    const { subject, body } = req.body;
+    await notifyLead(subject, body);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+// Health check
+app.get("/api/health", (_req, res) => {
+  res.json({ 
+    status: "ok", 
+    timestamp: new Date().toISOString(),
+    activeSessions: Object.keys(sessions).length 
+  });
+});
+
+// Páginas públicas
 app.get("/privacy-policy", (_req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-  res.status(200).type("html").send(`
-    <!DOCTYPE html>
-    <html lang="pt">
-    <head>
-      <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>Política de Privacidade - Aventour Viagens e Turismo</title>
-    </head>
-    <body style="font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; line-height: 1.6; padding: 0 16px;">
-      <h1>Política de Privacidade - Aventour Viagens e Turismo</h1>
-      <p>A Aventour Viagens e Turismo recolhe e processa dados enviados pelos utilizadores através do website, Messenger e outros canais de contacto para responder a pedidos de informação, reservas, agendamentos e apoio ao cliente.</p>
-      <h2>Dados que podemos recolher</h2>
-      <ul>
-        <li>Nome</li>
-        <li>Telefone</li>
-        <li>Email</li>
-        <li>Conteúdo das mensagens enviadas</li>
-        <li>Documentos enviados pelo cliente quando necessários ao processo</li>
-      </ul>
-      <h2>Como usamos os dados</h2>
-      <ul>
-        <li>Responder pedidos de informação</li>
-        <li>Processar reservas e agendamentos</li>
-        <li>Prestar apoio ao cliente</li>
-        <li>Melhorar o atendimento</li>
-      </ul>
-      <h2>Partilha de dados</h2>
-      <p>Não vendemos dados pessoais. Os dados só podem ser partilhados quando necessário para prestação do serviço ou cumprimento de obrigações legais.</p>
-      <h2>Remoção de dados</h2>
-      <p>O utilizador pode solicitar a remoção dos seus dados através do email abaixo.</p>
-      <h2>Contacto</h2>
-      <p>reservas@viagensaventour.com</p>
-      <p><strong>Última atualização:</strong> 27 de março de 2026</p>
-    </body>
-    </html>
-  `);
+  res.type("html").send(`<!DOCTYPE html><html lang="pt"><head><title>Política de Privacidade - Aventour</title></head><body style="font-family: Arial; max-width: 800px; margin: 40px auto; padding: 0 16px;"><h1>Política de Privacidade</h1><p>Dados recolhidos: nome, telefone, email, mensagens, documentos quando necessários.</p><p>Contacto: reservas@viagensaventour.com</p></body></html>`);
 });
 
 app.get("/data-deletion", (_req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-  res.status(200).type("html").send(`
-    <!DOCTYPE html>
-    <html lang="pt">
-    <head>
-      <meta charset="utf-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>Remoção de Dados - Aventour Viagens e Turismo</title>
-    </head>
-    <body style="font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; line-height: 1.6; padding: 0 16px;">
-      <h1>Instruções para Remoção de Dados</h1>
-      <p>Se deseja solicitar a remoção dos seus dados do sistema da Aventour, envie um email para:</p>
-      <p><strong>reservas@viagensaventour.com</strong></p>
-      <p>Inclua no pedido:</p>
-      <ul>
-        <li>Nome utilizado no contacto</li>
-        <li>Data aproximada da conversa</li>
-      </ul>
-      <p>A sua solicitação será processada no prazo máximo de 7 dias.</p>
-    </body>
-    </html>
-  `);
+  res.type("html").send(`<!DOCTYPE html><html lang="pt"><head><title>Remoção de Dados - Aventour</title></head><body style="font-family: Arial; max-width: 800px; margin: 40px auto; padding: 0 16px;"><h1>Remoção de Dados</h1><p>Envie email para: <strong>reservas@viagensaventour.com</strong></p></body></html>`);
 });
 
-// FRONTEND
+// Frontend
 async function start() {
   await ensureDataFiles();
 
@@ -694,14 +809,15 @@ async function start() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-
     app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Servidor em http://localhost:${PORT}`);
+    console.log(`🚀 Aventour Server rodando em http://localhost:${PORT}`);
+    console.log(`📧 Notificações: ${process.env.NOTIFY_EMAIL || process.env.SMTP_USER}`);
+    console.log(`🤖 Gemini: ${process.env.GEMINI_API_KEY ? "OK" : "NÃO CONFIGURADO"}`);
   });
 }
 
