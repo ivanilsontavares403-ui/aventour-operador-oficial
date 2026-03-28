@@ -47,7 +47,8 @@ type NotificationType =
   | "documentos_recebidos"
   | "lead_novo"
   | "cotacao_solicitada"
-  | "pagamento_recebido";
+  | "pagamento_recebido"
+  | "validacao_manual";
 
 interface Material {
   id: string;
@@ -103,6 +104,7 @@ interface ClientSession {
   history: Array<{ role: "user" | "model"; text: string }>;
   quoteId?: string;
   lastIntent?: string;
+  needsHuman?: boolean;
 }
 
 interface FlowResult {
@@ -114,6 +116,24 @@ interface FlowResult {
 const sessions: Record<string, ClientSession> = {};
 let processedMessageIds: Set<string> = new Set();
 
+const VALIDATION_TRIGGERS = [
+  "nao entendi",
+  "não entendi",
+  "explica melhor",
+  "quero saber melhor",
+  "mais detalhes",
+  "quero confirmar",
+  "confirmar isso",
+  "caso especial",
+  "contrato",
+  "vcs fazem contratos",
+  "voces fazem contratos",
+  "vocês fazem contratos",
+  "como assim",
+  "só queria saber",
+  "so queria saber",
+];
+
 function normalize(text: string): string {
   return text
     .toLowerCase()
@@ -123,12 +143,15 @@ function normalize(text: string): string {
     .trim();
 }
 
+function includesAny(text: string, patterns: string[]): boolean {
+  return patterns.some((p) => text.includes(normalize(p)));
+}
+
 function isResetCommand(text: string): boolean {
   return [
     "reiniciar",
     "recomecar",
     "recomeca",
-    "comecar",
     "comecar",
     "outro",
     "outro servico",
@@ -209,6 +232,7 @@ async function getClientSession(senderId: string): Promise<ClientSession> {
       data: {},
       updatedAt: new Date().toISOString(),
       history: [],
+      needsHuman: false,
     };
   }
   return sessions[senderId];
@@ -231,6 +255,7 @@ function resetSession(session: ClientSession): ClientSession {
     history: [],
     quoteId: undefined,
     lastIntent: undefined,
+    needsHuman: false,
   };
 }
 
@@ -372,6 +397,7 @@ async function sendQuoteToClient(quoteId: string, price: string, observation?: s
     const session = await getClientSession(quote.clientId);
     if (session.quoteId === quoteId) {
       session.step = "passagem_cotacao_enviada";
+      session.needsHuman = false;
       await saveClientSession(session);
     }
 
@@ -423,6 +449,7 @@ function detectIntent(text: string): { service: ServiceType; confidence: number 
 
   if (
     lower.includes("passagem") ||
+    lower.includes("passage") ||
     lower.includes("bilhete") ||
     lower.includes("voo") ||
     lower.includes("aviao")
@@ -452,6 +479,13 @@ function detectIntent(text: string): { service: ServiceType; confidence: number 
   return { service: "none", confidence: 0 };
 }
 
+function shouldPauseForValidation(session: ClientSession, lower: string): boolean {
+  if (session.service === "none") return false;
+  if (session.step === "passagem_aguardando_preco") return false;
+  if (session.step === "passagem_cotacao_enviada") return false;
+  return includesAny(lower, VALIDATION_TRIGGERS);
+}
+
 function isGenericSupportQuestion(lower: string): boolean {
   return [
     "onde fica",
@@ -475,6 +509,9 @@ function isGenericSupportQuestion(lower: string): boolean {
     "tempo",
     "servicos",
     "o que fazem",
+    "fazem contratos",
+    "fazem contrato",
+    "como assim",
   ].some((pattern) => lower.includes(pattern));
 }
 
@@ -510,6 +547,16 @@ function getCommonResponse(messageText: string, session: ClientSession): string 
       "",
       "Qual servico lhe interessa?",
     ].join("\n");
+  }
+
+  if (
+    lower.includes("fazem contratos") ||
+    lower.includes("fazem contrato") ||
+    lower.includes("vcs fazem contratos") ||
+    lower.includes("vocês fazem contratos") ||
+    lower.includes("voces fazem contratos")
+  ) {
+    return "No momento nao intermediamos contratos de trabalho diretamente. Ajudamos com agendamento consular, orientacao e acompanhamento do processo.";
   }
 
   if (
@@ -593,6 +640,9 @@ function getCommonResponse(messageText: string, session: ClientSession): string 
   }
 
   if (lower.includes("preco") || lower.includes("quanto custa") || lower.includes("valor") || lower.includes("custo")) {
+    if (lower.includes("reserva de hotel") || lower.includes("hotel")) {
+      return "A reserva de hotel custa 60 CVE por dia. Esse valor refere-se ao servico de reserva. O valor final da estadia depende do destino, datas e categoria do hotel.";
+    }
     if (session.service === "formacao") {
       return "Formacao em Portugal: 45.000 CVE. Sao 6.000 CVE de inscricao e 39.000 CVE de declaracao de matricula.";
     }
@@ -603,11 +653,15 @@ function getCommonResponse(messageText: string, session: ClientSession): string 
       return "Agendamento de Ferias: 20.000 CVE. Sao 5.000 CVE de reserva e 15.000 CVE apos confirmacao.";
     }
     if (session.service === "reserva_hotel") {
-      return "Reserva de Hotel: 60 CVE por dia.";
+      return "Reserva de Hotel: 60 CVE por dia. Esse valor e apenas do servico de reserva. O preco da estadia depende do hotel escolhido.";
     }
     if (session.service === "passagem") {
       return "O preco da passagem depende do destino, data e numero de passageiros. Posso registar a sua cotacao agora.";
     }
+  }
+
+  if (lower.includes("como assim 60 por dia") || (lower.includes("como assim") && session.service === "reserva_hotel")) {
+    return "Os 60 CVE por dia referem-se ao servico de reserva do hotel. O valor da estadia em si depende do destino, das datas e da categoria do hotel escolhido.";
   }
 
   if (lower.includes("prazo") || lower.includes("demora") || lower.includes("tempo") || lower.includes("duracao")) {
@@ -630,6 +684,7 @@ async function startServiceFlow(session: ClientSession, service: ServiceType, se
   session.step = "inicio";
   session.data = {};
   session.lastIntent = service;
+  session.needsHuman = false;
   await saveClientSession(session);
 
   switch (service) {
@@ -786,6 +841,24 @@ async function handleFormacao(session: ClientSession, text: string, lower: strin
   return { text: "Entendido. Pode continuar comigo sobre a formacao ou escrever reiniciar para voltar ao menu." };
 }
 
+async function createPendingQuote(session: ClientSession): Promise<Quote> {
+  const quote: Quote = {
+    id: `quote_${Date.now()}`,
+    clientId: session.senderId,
+    clientName: session.data.nome || "Cliente",
+    destination: session.data.destino,
+    details: `Data: ${session.data.data}, Pessoas: ${session.data.pessoas}`,
+    status: "pending",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const quotes = await readJsonFile<Quote[]>(quotesPath, []);
+  quotes.push(quote);
+  await writeJsonFile(quotesPath, quotes);
+  return quote;
+}
+
 async function handlePassagem(session: ClientSession, text: string, lower: string): Promise<FlowResult> {
   if (session.step === "inicio" || session.step === "passagem_destino") {
     session.data.destino = text;
@@ -808,34 +881,34 @@ async function handlePassagem(session: ClientSession, text: string, lower: strin
     }
 
     session.data.pessoas = String(pessoas);
+    const quote = await createPendingQuote(session);
 
-    const newQuote: Quote = {
-      id: `quote_${Date.now()}`,
-      clientId: session.senderId,
-      clientName: "Cliente",
-      destination: session.data.destino,
-      details: `Data: ${session.data.data}, Pessoas: ${pessoas}`,
-      status: "pending",
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    const quotes = await readJsonFile<Quote[]>(quotesPath, []);
-    quotes.push(newQuote);
-    await writeJsonFile(quotesPath, quotes);
-
-    session.quoteId = newQuote.id;
+    session.quoteId = quote.id;
     session.step = "passagem_aguardando_preco";
+    session.needsHuman = false;
     await saveClientSession(session);
 
     await notifyLead(
       "Passagem - Cotacao solicitada",
-      `Destino: ${session.data.destino}\nData: ${session.data.data}\nPessoas: ${pessoas}`
+      `QuoteId: ${quote.id}\nDestino: ${session.data.destino}\nData: ${session.data.data}\nPessoas: ${pessoas}`
+    );
+
+    await notifyAppCentral(
+      "cotacao_solicitada",
+      session.senderId,
+      `Nova cotacao pendente para ${session.data.destino}`,
+      {
+        quoteId: quote.id,
+        destino: session.data.destino,
+        data: session.data.data,
+        pessoas,
+        clientName: quote.clientName,
+      }
     );
 
     return {
       text: "Ja registei o seu pedido. A nossa equipa comercial esta a verificar as melhores tarifas disponiveis. Assim que tivermos o preco, enviamos aqui.",
-      quote: newQuote,
+      quote,
     };
   }
 
@@ -844,7 +917,7 @@ async function handlePassagem(session: ClientSession, text: string, lower: strin
   }
 
   if (session.step === "passagem_cotacao_enviada") {
-    if (lower.includes("opcao 1") || lower.includes("presencial") || lower.includes("vou ai") || lower.includes("vou ai")) {
+    if (lower.includes("opcao 1") || lower.includes("presencial") || lower.includes("vou ai") || lower.includes("vou aí")) {
       return {
         text: "Perfeito. Estamos em Achada Sao Filipe, Praia, ao lado de Calu e Angela. Horario: segunda a sexta, das 8h as 17h.",
       };
@@ -855,18 +928,20 @@ async function handlePassagem(session: ClientSession, text: string, lower: strin
       lower.includes("online") ||
       lower.includes("transferencia") ||
       lower.includes("nao posso ir") ||
+      lower.includes("não posso ir") ||
       lower.includes("nao consigo ir")
     ) {
+      session.needsHuman = true;
+      session.step = "validacao_manual";
+      await saveClientSession(session);
+      await notifyAppCentral(
+        "validacao_manual",
+        session.senderId,
+        "Cliente escolheu opcao online para passagem e precisa de validacao detalhada.",
+        { quoteId: session.quoteId, clientName: "Cliente" }
+      );
       return {
-        text: [
-          "Entendido. Vou enviar os dados bancarios para pagamento.",
-          "",
-          "Dados para transferencia:",
-          "[BANCO: CAIXA ECONOMICA DE CABO VERDE]",
-          "[CONTA: PREENCHER]",
-          "",
-          "Depois envie o comprovante + foto do passaporte + NIF.",
-        ].join("\n"),
+        text: "Entendi. Vou verificar este ponto com mais detalhe para lhe dar a informacao correta e seguirmos com seguranca.",
       };
     }
 
@@ -952,6 +1027,21 @@ async function handleAgendamento(session: ClientSession, lower: string, text: st
   }
 
   if (session.step === "agendamento_disponibilidade") {
+    if (includesAny(lower, ["só queria saber", "so queria saber", "fazem contratos", "fazem contrato"])) {
+      session.needsHuman = true;
+      session.step = "validacao_manual";
+      await saveClientSession(session);
+      await notifyAppCentral(
+        "validacao_manual",
+        session.senderId,
+        "Cliente saiu do fluxo de agendamento e pediu validacao detalhada sobre contratos.",
+        { tipo: session.data.tipo, clientName: "Cliente" }
+      );
+      return {
+        text: "Entendi. Vou verificar esse ponto com mais detalhe para lhe dar a informacao correta.",
+      };
+    }
+
     session.data.disponibilidade = text;
 
     await notifyLead(
@@ -990,11 +1080,11 @@ async function handleHotel(session: ClientSession, text: string): Promise<FlowRe
     await saveClientSession(session);
 
     return {
-      text: `Registado. Vamos verificar disponibilidade para ${session.data.local}. Custo: 60 CVE por dia. A equipa contacta em breve.`,
+      text: `Registado. Vamos verificar disponibilidade para ${session.data.local}. Custo do servico de reserva: 60 CVE por dia. O valor final da estadia depende do hotel escolhido.`,
     };
   }
 
-  return { text: "Ja registei a sua reserva de hotel. Se quiser voltar ao menu, escreva reiniciar." };
+  return { text: "Ja registei a sua reserva de hotel. Se quiser, posso explicar melhor como funciona o valor da reserva." };
 }
 
 async function handleReservaPassagem(session: ClientSession, text: string): Promise<FlowResult> {
@@ -1022,6 +1112,12 @@ async function handleFlow(senderId: string, messageText: string): Promise<FlowRe
     return { text: `Entendido. Vamos comecar de novo.\n\n${menuText()}` };
   }
 
+  if (session.step === "validacao_manual" && session.needsHuman) {
+    return {
+      text: "Estou a analisar este ponto com mais detalhe para lhe responder da forma certa.",
+    };
+  }
+
   const detectedIntent = detectIntent(lower);
   const explicitSwitch = detectedIntent.service !== "none" && detectedIntent.confidence >= 0.96;
 
@@ -1031,6 +1127,26 @@ async function handleFlow(senderId: string, messageText: string): Promise<FlowRe
 
   if (session.service !== "none" && explicitSwitch && detectedIntent.service !== session.service) {
     return startServiceFlow(session, detectedIntent.service, senderId, lower);
+  }
+
+  if (shouldPauseForValidation(session, lower)) {
+    session.needsHuman = true;
+    session.step = "validacao_manual";
+    await saveClientSession(session);
+    await notifyAppCentral(
+      "validacao_manual",
+      senderId,
+      "Cliente entrou em validacao manual discreta.",
+      {
+        service: session.service,
+        previousStep: session.step,
+        lastMessage: messageText,
+        clientName: "Cliente",
+      }
+    );
+    return {
+      text: "Entendi. Vou verificar esse ponto com mais detalhe para lhe dar a informacao correta.",
+    };
   }
 
   const commonResponse = getCommonResponse(text, session);
@@ -1166,7 +1282,7 @@ app.post("/api/quotes", async (req, res) => {
   const newQuote: Quote = {
     ...req.body,
     id: req.body.id || `quote_${Date.now()}`,
-    createdAt: new Date().toISOString(),
+    createdAt: req.body.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
 
